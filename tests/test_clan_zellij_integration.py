@@ -182,7 +182,7 @@ def test_one_round_through_real_tabs(home, repo, zellij_env):
         rev_log = (paths.harness_dir("reviewer") / "nudges.log").read_text()
         assert "ratel: @reviewer 1 new on #" in rev_log     # a real keystroke nudge, not a poll
 
-        cursors = {p.stem for p in (paths.channel_dir / "cursors").glob("*.json")}
+        cursors = {p["agent"] for p in bus.presence()}
         assert cursors <= {"orchestrator", "developer", "reviewer"}
         assert "watch" not in cursors                          # the watcher owns no cursor
     finally:

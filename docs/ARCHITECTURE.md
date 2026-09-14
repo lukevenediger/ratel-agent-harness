@@ -1,6 +1,6 @@
 # Architecture
 
-ratel is three small processes sharing one directory of files. This document describes the
+ratel is a set of small processes sharing a directory with one SQLite database per channel. This document describes the
 pieces, the on-disk format, the message schema, the tool semantics, and the security boundary.
 Design rationale lives in [DECISIONS.md](DECISIONS.md).
 
@@ -30,7 +30,9 @@ Module map:
 | File | Responsibility |
 |---|---|
 | `ratel/ulid.py` | 26-char ULID ids, monotonic within a process |
-| `ratel/bus.py` | `Bus`: post/read, cursors + presence, threads, pins, attachments, wait, attachment normalization |
+| `ratel/bus.py` | `Bus`: channel operations, presence, attachments, waiting and read-only legacy routing |
+| `ratel/storage.py` | SQLite schema, append sequences, indexed reads, pin state and atomic cursor operations |
+| `ratel/legacy.py` | Read-only JSONL compatibility and explicit offline import |
 | `ratel/ops.py` | `AgentOps`: per-agent semantics (own posts not echoed, cursor advance rules, catch_up) |
 | `ratel/mcp_server.py` | `build_server(bus, agent)`: one MCP tool per `AgentOps` method; `main()` reads env |
 | `ratel/cli.py` | argparse front-end over `AgentOps`; one JSON value per invocation |
@@ -45,36 +47,60 @@ Module map:
 $RATEL_HOME/            default ~/.ratel — outside every repo
   channels/
     <channel>/
-      bus.jsonl             append-only; one JSON object per line, every message and reply
-      cursors/<agent>.json  {"last_read": "<id>", "ts": "<iso>"}; written under fcntl.flock
+      channel.sqlite3       messages, append sequence, cursors and current pins
+      channel.sqlite3-wal   SQLite-managed WAL (may exist while connections are open)
+      channel.sqlite3-shm   SQLite-managed coordination (may exist)
+      bus.jsonl             retained legacy input after explicit migration, never dual-written
+      cursors/<agent>.json  retained legacy input after migration
       files/                attachments by ref; ULID-prefixed names, flat (no subdirs)
       plans/                orchestrator-owned markdown plans (the source of truth for task lists)
 ```
 
-A channel exists when its `bus.jsonl` exists. The board lists channels by scanning this directory;
-nothing registers a channel — the first `Bus(home, channel)` creates it.
+A channel exists when `channel.sqlite3` or a legacy `bus.jsonl` exists. New channels use
+SQLite. The board reads unmigrated channels without creating a database. A writer opening
+an unmigrated channel fails with the migration command rather than silently changing storage.
 
-### Write path
+### Transactions and delivery order
 
-`Bus.post` builds the message, normalizes attachments, fits it under 4000 bytes, and appends one
-line with `O_WRONLY | O_APPEND`. Lines under `PIPE_BUF` (4096) are appended atomically by the
-kernel, so concurrent writers from different processes never interleave and there is no lock on the
-bus file. Anything larger than the budget spills: `code` attachment bodies become files in `files/`,
-then the text itself is written to `files/<id>.md` and truncated in the line with a `file`
-attachment pointing at the full copy.
+`storage.py` owns schema version 1 (`PRAGMA user_version`). `messages` stores a unique public
+ULID, indexed parent ID, full JSON message and an `INTEGER PRIMARY KEY AUTOINCREMENT` sequence.
+The sequence defines append order; ULIDs only identify messages. `since` resolves the public
+ID to its sequence. An unknown cursor replays from the beginning, preferring duplicates to
+loss. `cursors` stores the last consumed sequence and presence timestamp. `pins` stores the
+current pinned set, updated in the same transaction as the message carrying the pin action.
 
-### Read path
+Agent posting performs the tip check, insertion and optional cursor advance under one
+`BEGIN IMMEDIATE` transaction. Reading for an agent selects a batch and advances its cursor
+under the same lock. Cursor advancement uses SQL `max`, including presence-only touches, so
+an older concurrent operation cannot rewind progress. A failed mention predicate does not
+advance the cursor. Posting directly through Bus does not change an agent cursor unless the
+caller explicitly requests agent-post semantics.
 
-Readers parse `bus.jsonl` from the top every time (`read_all`). A trailing line without `\n` is a
-write in progress and is skipped. There is no index; the file is small for months of coordination
-traffic, and the board's SSE loop tails by byte offset rather than re-parsing.
+SQLite WAL permits readers alongside a writer on local disk. Each call owns its connection;
+connections are never shared across threads/processes or held across sleeps/network writes.
+Lock waits are bounded to five seconds; WAL initialization also retries immediate busy errors
+for at most five seconds. The default SQLite durability settings are retained. Database errors
+are surfaced rather than dropping writes. Attachment bytes remain files, named with full ULIDs
+and opened exclusively; a collision fails instead of overwriting. Full message/code text stays
+in SQLite with no artificial 4 KB spill/truncation rule.
 
-### Cursors and presence
+### Compatibility and migration
 
-Each agent has one cursor file: the id of the last message it has consumed, plus a timestamp.
-Reads use `fcntl.flock(LOCK_SH)`, writes `LOCK_EX`. Presence is derived from the cursor
-timestamp: an agent is "online" if its cursor was touched in the last five minutes. Every tool
-call touches the cursor, so presence reflects *reading*, not liveness.
+`ratel migrate --channel NAME` imports legacy messages in file order and maps known cursor IDs
+to that order. It reports skipped malformed/torn lines, preserves the originals, and aborts on
+duplicate IDs. The import is built in a temporary database and published only after a complete
+transaction; publication refuses to replace an existing database. Migration is explicitly
+offline: stop all old writers, migrate, and restart all of them using the new binary. Never
+resume an old JSONL writer beside a migrated database. A repeated migration is refused.
+
+`ratel export` emits JSONL without advancing cursors; `ratel tail` follows committed messages
+through Bus. See [cli-contract.md](cli-contract.md#storage-and-migration) for backup and rollback.
+
+### Presence
+
+Presence is derived from each cursor's timestamp, with a five-minute default window. It
+indicates recent channel interaction, not process liveness. Read-only board requests do not
+advance cursors or mutate messages; SQLite may manage its own WAL/shared-memory sidecars.
 
 ## Message schema
 
@@ -93,7 +119,7 @@ call touches the cursor, so presence reflects *reading*, not liveness.
 
 | Field | Notes |
 |---|---|
-| `id` | ULID; lexicographic order is time order, so `since` comparisons are string comparisons |
+| `id` | Public ULID identity; `since` resolves it to database append order |
 | `ts` | UTC, milliseconds, `Z` suffix |
 | `from` | `AGENT_NAME` of the poster. The human never posts |
 | `text` | Markdown. Inline code, fences, links, checklists, `@mentions` |
@@ -103,7 +129,7 @@ call touches the cursor, so presence reflects *reading*, not liveness.
 | `pin` | `false`, `true` (pins this message), or a message id (pins that message) |
 | `unpin` | Optional; a message id to unpin |
 
-There is no `kind` field. Pins are replayed from the log in order to compute the current pinned set.
+There is no `kind` field. Pin actions remain in message history; their current state is maintained transactionally.
 
 ### Attachments
 
@@ -147,14 +173,14 @@ token-gated write route (the clan-approval POST — the request contract lives i
 | `GET /api/channels` | Every channel with presence and message count (parses each bus in full — call on load and switch, never on a timer) |
 | `GET /api/channels/{ch}/messages?since=&limit=` | Messages and the current pins |
 | `GET /api/channels/{ch}/thread/{id}` | Parent and replies |
-| `GET /api/channels/{ch}/events?since=` | SSE: `hello` (presence), then `message` per new line, `presence` every 10 s, `: ping` every 15 s. With `since`, replays messages after that id before tailing — this closes the race between the initial fetch and the stream connect |
+| `GET /api/channels/{ch}/events?since=` | SSE: `hello` (presence), then `message` per committed message (with SSE `id`, honoring `Last-Event-ID` on reconnect), `presence` every 10 s, `: ping` every 15 s. With `since`, replays messages after that id before tailing — this closes the race between the initial fetch and the stream connect |
 | `GET /api/channels/{ch}/unfurl?url=` | GitHub PR/issue or Google Doc card data, cached 300 s (30 s for failures) |
 | `GET /files/{ch}/{name}` | Attachment bytes from that channel's `files/` |
 | `GET /static/{name}` | A vendored asset, from an allow-list dict keyed by filename (`mermaid.min.js` only). `immutable` caching — the page asks for `?v=<version>` — plus `nosniff` and `default-src 'none'` on the asset itself. gzip is derived in memory and cached per process, never committed. Deliberately NOT the `/files/` handler: that one serves attacker-named content and carries its own sandboxing CSP |
 | `GET /api/clan/catalog` | The clan/model catalog (`harnesses`, `presets`, `roles`, `models`) — the same object `ratel clan catalog` prints |
 | `POST /api/channels/{ch}/post` | The only write route: `201 {"id"}`, landing the message as `stakeholder`. Bearer token required; the body must carry exactly one `clan` attachment with `status: "approved"` whose `supersedes` names the newest proposed clan message on the channel, validated by the same `validate_clan_attachment` as the CLI — a stale approval 422s, so two open tabs (or curl) cannot land an old clan over a newer proposal |
 
-The page keeps a `Set` of rendered ids and ignores duplicates, refetches pins only when a message
+The page tracks its last ingested ID in append order and keeps a `Set` of rendered ids and ignores duplicates, refetches pins only when a message
 carries a truthy `pin` or an `unpin`, assigns agent colours in first-seen order per channel
 (persisted in `localStorage`), and marks live arrivals with a NEW divider plus a one-time accent
 flash. Dark theme by default; light follows `prefers-color-scheme`. Visual contract:

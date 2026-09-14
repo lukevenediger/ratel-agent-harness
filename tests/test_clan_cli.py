@@ -236,7 +236,7 @@ def test_new_opens_the_orchestrator_watch_and_bus_tabs(home, repo, fake_zellij):
     assert orch_argv[2:] == ["ratel.cli", "clan", "launch", "--home", str(home),
                              "--channel", "harbor-42", "orchestrator"]
     assert z.tabs[1][2][-1] == "watch" or "watch" in z.tabs[1][2]
-    assert z.tabs[2][2][0] == "tail" and z.tabs[2][2][-1].endswith("bus.jsonl")
+    assert z.tabs[2][2] == [sys.executable, "-m", "ratel.cli", "tail", "--home", str(home), "--channel", "harbor-42"]
 
 
 def test_new_records_state_the_other_commands_read(home, repo, fake_zellij):

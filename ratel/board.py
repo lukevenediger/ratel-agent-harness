@@ -15,6 +15,7 @@ import mimetypes
 import os
 import re
 import secrets
+import sqlite3
 import stat
 import sys
 import threading
@@ -24,7 +25,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, unquote, urlparse
 
-from .bus import Bus, default_home, is_message, now_iso
+from .bus import Bus, default_home, now_iso
 from .clan.config import CATALOG_ERRORS, ClanConfig, ClanPaths, load_catalog, read_state
 from .clan.config import catalog as clan_catalog
 from .clan.proposal import validate_clan_attachment
@@ -199,7 +200,7 @@ def list_channels(home: Path) -> list[str]:
     root = home / "channels"
     if not root.is_dir():
         return []
-    return sorted(p.name for p in root.iterdir() if (p / "bus.jsonl").is_file())
+    return sorted(p.name for p in root.iterdir() if ((p / "channel.sqlite3").is_file() or (p / "bus.jsonl").is_file()))
 
 
 class BoardHandler(BaseHTTPRequestHandler):
@@ -279,7 +280,7 @@ class BoardHandler(BaseHTTPRequestHandler):
                     t = bus.read_thread(parts[4])
                     return self._json(t) if t else self._error(404, "no such message")
                 if parts[3] == "events" and len(parts) == 4:
-                    return self._sse(bus, q.get("since"))
+                    return self._sse(bus, self.headers.get("Last-Event-ID") or q.get("since"))
                 if parts[3] == "clan" and len(parts) == 4:
                     return self._json(self._clan(parts[2]))
                 if parts[3] == "unfurl" and len(parts) == 4:  # wired in Task 10
@@ -296,6 +297,8 @@ class BoardHandler(BaseHTTPRequestHandler):
             return self._do_post()
         except (BrokenPipeError, ConnectionResetError):
             pass
+        except (ValueError, sqlite3.Error):
+            self._error(409, "channel unavailable for writes; check storage and migration status")
 
     def _do_post(self):
         parts = [p for p in unquote(urlparse(self.path).path).split("/") if p]
@@ -523,25 +526,12 @@ class BoardHandler(BaseHTTPRequestHandler):
         self.end_headers()
 
         def emit(event: str, data) -> None:
-            self.wfile.write(f"event: {event}\ndata: {json.dumps(data)}\n\n".encode())
+            event_id = f"id: {data['id']}\n" if event == "message" else ""
+            self.wfile.write(f"event: {event}\n{event_id}data: {json.dumps(data)}\n\n".encode())
             self.wfile.flush()
 
+        cursor = bus.tip() if since is None else since
         emit("hello", {"presence": bus.presence()})
-
-        def bus_size(default: int) -> int:
-            """The bus size, or `default` when the file has vanished under the
-            stream — a missing bus is empty and unchanged, the same rule
-            `read_all` uses."""
-            try:
-                return bus.bus_path.stat().st_size
-            except FileNotFoundError:
-                return default
-
-        if since is not None:
-            offset = 0
-            # replay everything after `since` by tailing from byte 0 and filtering below
-        else:
-            offset = bus_size(0)
         last_presence = last_ping = time.monotonic()
         clan_sig = _clan_signature(self.home, bus.channel)   # emit on change only
         while not self.server.stop.is_set():
@@ -552,32 +542,9 @@ class BoardHandler(BaseHTTPRequestHandler):
                 # the expensive work once per client and turn an exception into a
                 # dropped stream. The client refetches, coalesced.
                 emit("clan", {"sig": sig, "at": now_iso()})
-            size = bus_size(offset)
-            if size > offset:
-                with open(bus.bus_path, "rb") as f:
-                    f.seek(offset)
-                    chunk = f.read(size - offset)
-                complete = chunk.rfind(b"\n") + 1
-                for raw in chunk[:complete].splitlines():
-                    try:
-                        msg = json.loads(raw)
-                    except json.JSONDecodeError:
-                        continue
-                    # this tail reads the file itself, so it repeats read_all's
-                    # contract via the one shared predicate: a line that is not
-                    # a message is never compared against `since` or streamed
-                    if not is_message(msg):
-                        continue
-                    if since is not None and msg["id"] <= since:
-                        continue
-                    emit("message", msg)
-                offset += complete
-            elif size < offset:
-                # rotated or recreated: the file is new content, read it from
-                # the top. Adopting `size` here skipped everything already in
-                # the new file and the stream went silent until it outgrew
-                # the old offset.
-                offset = 0
+            for msg in bus.read_since(cursor, limit=200):
+                emit("message", msg)
+                cursor = msg["id"]
             now = time.monotonic()
             if now - last_presence >= 10:
                 emit("presence", {"presence": bus.presence()})

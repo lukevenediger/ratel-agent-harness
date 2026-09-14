@@ -107,6 +107,27 @@ def test_sse_since_replays_missed_messages(home, srv):
     assert "event: hello" in text and missed["id"] in text and a["id"] not in text
 
 
+def test_sse_reconnect_uses_last_event_id_in_append_order(home, srv, monkeypatch):
+    b = Bus(home, "c")
+    first = b.post("o", "original fetch")
+    ids = iter(["01K00000000000000000000009", "01K00000000000000000000001"])
+    monkeypatch.setattr("ratel.bus.ulid", lambda: next(ids))
+    delivered = b.post("o", "already delivered")
+    missed = b.post("o", "missed with a lower ULID")
+    req = urllib.request.Request(srv + f"/api/channels/c/events?since={first['id']}",
+                                 headers={"Last-Event-ID": delivered["id"]})
+    with urllib.request.urlopen(req, timeout=5) as response:
+        chunks = []
+        for raw in response:
+            chunks.append(raw.decode())
+            if "".join(chunks).count("\n\n") == 2:
+                break
+    text = "".join(chunks)
+    assert f"id: {missed['id']}\n" in text
+    assert missed["text"] in text
+    assert delivered["id"] not in text and first["id"] not in text
+
+
 def test_sse_empty_since_replays_from_beginning(home, srv):
     # Interfaces bullet: `since` "may be empty string = from the beginning".
     b = Bus(home, "c")
@@ -390,9 +411,14 @@ def _one_poisoned_channel(home, srv, poison):
     return {r["name"]: r for r in json.loads(body)["channels"]}
 
 
+def _poison_legacy(home, ch, raw):
+    (home / "channels" / ch / "channel.sqlite3").unlink()
+    (home / "channels" / ch / "bus.jsonl").write_text(raw)
+
+
 def test_channels_survive_a_non_object_bus_line(home, srv):
     rows = _one_poisoned_channel(
-        home, srv, lambda h, ch: (h / "channels" / ch / "bus.jsonl").write_text("null\n"))
+        home, srv, lambda h, ch: _poison_legacy(h, ch, "null\n"))
     assert set(rows) == {"healthy", "poisoned"}
     # the null line is dropped by read_all, so it is not counted and cannot order the row
     assert rows["poisoned"]["count"] == 0 and rows["poisoned"]["last_id"] is None
@@ -400,8 +426,7 @@ def test_channels_survive_a_non_object_bus_line(home, srv):
 
 def test_channels_survive_a_non_string_last_id(home, srv):
     def poison(home, ch):
-        (home / "channels" / ch / "bus.jsonl").write_text(
-            '{"id": 123, "ts": "t", "from": "o", "text": "x"}\n')
+        _poison_legacy(home, ch, '{"id": 123, "ts": "t", "from": "o", "text": "x"}\n')
     rows = _one_poisoned_channel(home, srv, poison)
     assert set(rows) == {"healthy", "poisoned"}
     assert rows["poisoned"]["last_id"] is None       # dropped, not used as a sort key
@@ -529,7 +554,7 @@ def test_clan_routes_never_write_state(home, srv):
     are unchanged across a clan, list and messages request. The bus mtime is a
     GET's business only if the handler did not touch the file — `Bus(read_only=)`."""
     state_path = _seed_clan(home, "c")
-    bus_path = home / "channels" / "c" / "bus.jsonl"
+    bus_path = home / "channels" / "c" / "channel.sqlite3"
     state_before = (state_path.read_bytes(), state_path.stat().st_mtime_ns)
     bus_before = (bus_path.read_bytes(), bus_path.stat().st_mtime_ns)
     get(srv, "/api/channels/c/clan")
@@ -545,11 +570,15 @@ def test_sse_replay_skips_a_poisoned_bus_line(home, srv):
     must not be streamed live as an empty card that vanishes on reload."""
     b = Bus(home, "c")
     seen = b.post("o", "seen")
+    after = b.post("o", "after the poison")
+    b.db_path.unlink()
+    b.bus_path.write_text(json.dumps(seen) + "\n")
     poison_id = "01ZZZZZZZZZZZZZZZZZZZZZZZZ"
     with open(b.bus_path, "a") as f:
         f.write("null\n")
         f.write(json.dumps({"id": poison_id, "ts": "t"}) + "\n")   # id only: not a message
-    after = b.post("o", "after the poison")
+    with b.bus_path.open("a") as f:
+        f.write(json.dumps(after) + "\n")
     with urllib.request.urlopen(
             srv + f"/api/channels/c/events?since={seen['id']}", timeout=5) as r:
         chunks = []
@@ -581,7 +610,7 @@ def test_sse_survives_the_bus_being_unlinked_mid_stream(home, srv):
 
     t = threading.Thread(target=run, daemon=True); t.start()
     time.sleep(0.7)
-    b.bus_path.unlink()
+    b.db_path.unlink()
     time.sleep(2.5)
     assert state["events"] >= 1
     assert not state["ended"], f"the stream dropped: {state}"
@@ -609,7 +638,7 @@ def test_sse_delivers_a_bus_recreated_shorter_than_its_offset(home, srv):
 
     t = threading.Thread(target=run, daemon=True); t.start()
     time.sleep(0.7)                               # the stream has adopted the tip
-    b.bus_path.unlink()
+    b.db_path.unlink()
     Bus(home, "c").post("o", "short")             # a fresh, shorter bus
     t.join(6)
     assert got["texts"] == ["short"], got

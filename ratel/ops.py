@@ -15,19 +15,6 @@ class AgentOps:
         self.bus = bus
         self.agent = agent
 
-    # ---- internals -----------------------------------------------------
-    def _tip(self) -> str | None:
-        msgs = self.bus.read_all()
-        return msgs[-1]["id"] if msgs else None
-
-    def _advance(self, to_id: str | None) -> None:
-        """Move the cursor forward only; otherwise just refresh presence."""
-        cur = self.bus.get_cursor(self.agent)
-        if to_id and (cur is None or to_id > cur):
-            self.bus.set_cursor(self.agent, to_id)
-        else:
-            self.bus.touch_cursor(self.agent)
-
     def _others(self, msgs: list[dict]) -> list[dict]:
         return [m for m in msgs if m["from"] != self.agent]
 
@@ -40,20 +27,12 @@ class AgentOps:
         rebuild or trim it. A missing `type` is inferred from the shape (`ref` →
         file, `url` → link, `body` → code, `items` → tasks).
         """
-        at_tip = self.bus.get_cursor(self.agent) == self._tip()
-        msg = self.bus.post(self.agent, text, parent=parent, attachments=attachments, pin=pin)
-        if at_tip:
-            self.bus.set_cursor(self.agent, msg["id"])
-        else:
-            self.bus.touch_cursor(self.agent)
-        return msg["id"]
+        return self.bus.post(self.agent, text, parent=parent, attachments=attachments,
+                             pin=pin, advance_sender=True)["id"]
 
     def read_channel(self, since: str | None = None, limit: int | None = None) -> list[dict]:
-        """Messages after `since` (default: your cursor), oldest first, excluding your own."""
-        cur = since if since is not None else self.bus.get_cursor(self.agent)
-        msgs = self.bus.read_since(cur, limit)
-        self._advance(msgs[-1]["id"] if msgs else None)
-        return self._others(msgs)
+        """Messages after a public id, in append order; consume atomically."""
+        return self._others(self.bus.consume(self.agent, since=since, limit=limit))
 
     def read_thread(self, id: str) -> dict[str, Any]:
         t = self.bus.read_thread(id)

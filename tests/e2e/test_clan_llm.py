@@ -114,7 +114,7 @@ def test_clan_runs_the_case(case, tmp_path):
             except Exception as exc:                # cleanup must never mask the real failure
                 problems.append(f"{type(exc).__name__}: {exc}")
         if error is not None:
-            print(f"\nbus.jsonl: {home / 'channels' / channel / 'bus.jsonl'}")
+            print(f"\nchannel.sqlite3: {home / 'channels' / channel / 'channel.sqlite3'}")
             print(f"issue:     https://github.com/{gh.sandbox()}/issues/{n}")
             print(f"PR:        {pr and 'https://github.com/%s/pull/%s' % (gh.sandbox(), pr['number'])}")
         for problem in problems:

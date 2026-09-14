@@ -1,7 +1,6 @@
 """Owner of the on-disk channel format. Everything else goes through this."""
 from __future__ import annotations
 
-import fcntl
 import json
 import mimetypes
 import os
@@ -12,6 +11,8 @@ import time
 from datetime import datetime, timezone
 from pathlib import Path
 
+from . import legacy
+from .storage import Store
 from .ulid import is_ulid, ulid
 
 MENTION_RE = re.compile(r"(?<![\w@.])@([A-Za-z0-9][A-Za-z0-9_-]*)")
@@ -29,16 +30,32 @@ def now_iso() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="milliseconds").replace("+00:00", "Z")
 
 
+def validate_name(value: str, kind: str = "channel") -> str:
+    if not isinstance(value, str) or not re.fullmatch(r"[A-Za-z0-9_.-]+", value) or value in (".", ".."):
+        raise ValueError(f"invalid {kind} name")
+    return value
+
+
+def valid_timestamp(value) -> bool:
+    if not isinstance(value, str):
+        return False
+    try:
+        return datetime.fromisoformat(value.replace("Z", "+00:00")).tzinfo is not None
+    except ValueError:
+        return False
+
+
 def is_message(doc) -> bool:
-    """Whether a parsed bus line is a message every reader can dereference:
-    a dict with `id`/`from`/`text` as `str` and `mentions` a `list`. The bus is
-    agent-writable, so `read_all` and the SSE tail both drop a line this
-    rejects. One definition, so the two readers cannot disagree."""
+    """Minimum legacy record contract shared by import and read-only browsing."""
     return (isinstance(doc, dict)
-            and isinstance(doc.get("id"), str)
+            and is_ulid(doc.get("id"))
             and isinstance(doc.get("from"), str)
             and isinstance(doc.get("text"), str)
-            and isinstance(doc.get("mentions"), list))
+            and isinstance(doc.get("mentions"), list)
+            and all(isinstance(m, str) for m in doc["mentions"])
+            and (doc.get("parent") is None or isinstance(doc["parent"], str))
+            and isinstance(doc.get("attachments", []), list)
+            and all(isinstance(a, dict) for a in doc.get("attachments", [])))
 
 
 def default_home() -> Path:
@@ -93,216 +110,141 @@ def normalize_attachment(att: dict, files_dir: Path | None = None) -> dict:
 
 
 class Bus:
-    MAX_LINE = 4000  # bytes, incl. newline; O_APPEND is atomic under PIPE_BUF (4096)
-
     def __init__(self, home: Path | str, channel: str, read_only: bool = False):
-        """`read_only` skips creating the channel dirs and touching `bus.jsonl`,
-        for callers that only read (the board's handlers). Without it a GET
-        rewrites the bus mtime, which then no longer means "last activity"."""
         self.home = Path(home).expanduser()
-        self.channel = channel
+        self.channel = validate_name(channel)
         self.channel_dir = self.home / "channels" / channel
-        self.bus_path = self.channel_dir / "bus.jsonl"
-        self.cursors_dir = self.channel_dir / "cursors"
+        if not self.channel_dir.resolve().is_relative_to((self.home / "channels").resolve()):
+            raise ValueError("channel path escapes channels directory")
+        self.bus_path = self.channel_dir / "bus.jsonl"  # legacy input only
+        self.db_path = self.channel_dir / "channel.sqlite3"
+        self.cursors_dir = self.channel_dir / "cursors"  # legacy input only
         self.files_dir = self.channel_dir / "files"
         self.plans_dir = self.channel_dir / "plans"
+        self.read_only = read_only
+        self.store = Store(self.db_path)
         if not read_only:
-            for d in (self.cursors_dir, self.files_dir, self.plans_dir):
+            if self.bus_path.exists() and not self.db_path.exists():
+                raise ValueError("legacy channel is read-only; stop its writers and run "
+                                 "ratel migrate --channel " + channel)
+            for d in (self.files_dir, self.plans_dir):
                 d.mkdir(parents=True, exist_ok=True)
-            self.bus_path.touch()
+            self.store.initialize()
 
-    # ---- write ---------------------------------------------------------
+    def _writable(self):
+        if self.read_only:
+            raise ValueError("this channel was opened read-only")
+
+    @property
+    def is_legacy(self):
+        return not self.db_path.exists() and self.bus_path.exists()
+
     def post(self, sender: str, text: str, parent: str | None = None,
              attachments: list[dict] | None = None, pin: bool | str = False,
-             unpin: str | None = None) -> dict:
+             unpin: str | None = None, *, advance_sender: bool = False) -> dict:
+        self._writable()
+        validate_name(sender, "agent")
+        if not isinstance(text, str):
+            raise ValueError("text must be a string")
         if parent is not None and not is_ulid(parent):
-            # `parent` becomes a thread id that the watcher and `clan checkpoint`
-            # interpolate into typed keystrokes — only a ULID may pass
             raise ValueError("parent must be a ULID message id or None")
-        msg = {
-            "id": ulid(),
-            "ts": now_iso(),
-            "from": sender,
-            "text": text or "",
-            "parent": parent,
-            "mentions": extract_mentions(text),
-            "attachments": [normalize_attachment(a, self.files_dir) for a in (attachments or [])],
-            "pin": pin if isinstance(pin, str) else bool(pin),
-        }
+        if attachments is not None and not isinstance(attachments, list):
+            raise ValueError("attachments must be a list")
+        msg = {"id": ulid(), "ts": now_iso(), "from": sender, "text": text,
+               "parent": parent, "mentions": extract_mentions(text),
+               "attachments": [normalize_attachment(a, self.files_dir) for a in (attachments or [])],
+               "pin": pin if isinstance(pin, str) else bool(pin)}
         if unpin:
             msg["unpin"] = unpin
-        msg = self._fit(msg)
-        line = (_dumps(msg) + "\n").encode()
-        fd = os.open(self.bus_path, os.O_WRONLY | os.O_APPEND | os.O_CREAT, 0o644)
-        try:
-            os.write(fd, line)
-        finally:
-            os.close(fd)
-        return msg
+        return self.store.post(msg, advance_sender=advance_sender)
 
-    def _line_len(self, msg: dict) -> int:
-        return len(_dumps(msg).encode()) + 1
-
-    def _fit(self, msg: dict) -> dict:
-        """Guarantee one line <= MAX_LINE by spilling code bodies, then text, to files/."""
-        if self._line_len(msg) <= self.MAX_LINE:
-            return msg
-        atts = []
-        for a in msg["attachments"]:
-            if a.get("type") == "code":
-                name = f"{msg['id']}-{Path(a.get('file') or 'snippet').name}"
-                (self.files_dir / name).write_text(a.get("body", ""))
-                atts.append({"type": "file", "ref": f"files/{name}", "name": a.get("file") or name,
-                             "mime": "text/plain", "lang": a.get("lang")})
-            else:
-                atts.append(a)
-        msg["attachments"] = atts
-        if self._line_len(msg) <= self.MAX_LINE:
-            return msg
-        name = f"{msg['id']}.md"
-        (self.files_dir / name).write_text(msg["text"])
-        msg["attachments"].append({"type": "file", "ref": f"files/{name}", "name": name, "mime": "text/markdown"})
-        budget = self.MAX_LINE - self._line_len({**msg, "text": ""}) - 8
-        msg["text"] = msg["text"].encode()[: max(budget, 0)].decode(errors="ignore").rstrip() + " …"
-        return msg
-
-    # ---- read ----------------------------------------------------------
     def read_all(self) -> list[dict]:
-        """Every line that parses to a message a reader can dereference.
-
-        bus.jsonl is append-only and agent-writable, so a line can be valid JSON
-        of the wrong shape — a bare scalar, an array, or an object with the
-        wrong field types. A message every reader relies on has `id`/`from`/
-        `text` as `str` and `mentions` as a `list`; anything else is dropped
-        here once instead of guarding every call site, because a line no reader
-        can dereference is not a message and no longer counts. Invalid JSON was
-        already dropped. This is read-side only: every write is O_APPEND and
-        nothing rewrites the file from a read, so a dropped line is never
-        deleted. A missing bus.jsonl is an empty channel, not an error — the
-        read-only `Bus` no longer creates the file, so this must tolerate it.
-        """
-        out = []
-        try:
-            f = open(self.bus_path, "rb")
-        except FileNotFoundError:
-            return []
-        with f:
-            for raw in f:
-                if not raw.endswith(b"\n"):
-                    break  # torn write in progress
-                try:
-                    msg = json.loads(raw)
-                except json.JSONDecodeError:
-                    continue
-                if is_message(msg):
-                    out.append(msg)
-        return out
+        return self.read_since(None)
 
     def read_since(self, since: str | None, limit: int | None = None) -> list[dict]:
-        msgs = [m for m in self.read_all() if since is None or m["id"] > since]
-        return msgs[:limit] if limit else msgs
+        if self.is_legacy:
+            msgs, _ = legacy.messages(self.bus_path)
+            start = next((i + 1 for i, m in enumerate(msgs) if m["id"] == since), 0)
+            return msgs[start:start + limit] if limit is not None else msgs[start:]
+        return self.store.read_since(since, limit)
 
-    # ---- cursors / presence -------------------------------------------
-    def cursor_path(self, agent: str) -> Path:
-        return self.cursors_dir / f"{agent}.json"
+    def tip(self) -> str | None:
+        if self.is_legacy:
+            msgs = self.read_all()
+            return msgs[-1]["id"] if msgs else None
+        return self.store.tip()
 
-    def _read_cursor(self, agent: str) -> dict:
-        p = self.cursor_path(agent)
-        if not p.exists():
-            return {}
-        with open(p, "r") as f:
-            fcntl.flock(f, fcntl.LOCK_SH)
-            try:
-                raw = f.read()
-            finally:
-                fcntl.flock(f, fcntl.LOCK_UN)
-        try:
-            doc = json.loads(raw) if raw.strip() else {}
-        except json.JSONDecodeError:
-            return {}
-        return doc if isinstance(doc, dict) else {}   # valid JSON, wrong shape
+    def consume(self, agent, since=None, limit=None, mention_only=None):
+        self._writable()
+        validate_name(agent, "agent")
+        return self.store.consume(agent, now_iso(), since, limit, mention_only)
 
     def get_cursor(self, agent: str) -> str | None:
-        return self._read_cursor(agent).get("last_read")
+        validate_name(agent, "agent")
+        if self.is_legacy:
+            value = legacy.cursors(self.cursors_dir).get(agent, {}).get("last_read")
+            return value if isinstance(value, str) else None
+        return self.store.get_cursor(agent)
 
     def set_cursor(self, agent: str, last_read: str | None) -> None:
-        with open(self.cursor_path(agent), "a+") as f:
-            fcntl.flock(f, fcntl.LOCK_EX)
-            try:
-                f.seek(0)
-                f.truncate()
-                f.write(_dumps({"last_read": last_read, "ts": now_iso()}))
-                f.flush()
-            finally:
-                fcntl.flock(f, fcntl.LOCK_UN)
+        self._writable()
+        validate_name(agent, "agent")
+        self.store.set_cursor(agent, last_read, now_iso())
 
     def touch_cursor(self, agent: str) -> None:
-        self.set_cursor(agent, self.get_cursor(agent))
+        # A zero sequence only refreshes presence; SQL max() preserves progress.
+        self.set_cursor(agent, None)
 
     def presence(self, window_s: int = 300) -> list[dict]:
-        out = []
+        rows = ([(a, d.get("ts")) for a, d in legacy.cursors(self.cursors_dir).items()]
+                if self.is_legacy else self.store.cursors())
         now = datetime.now(timezone.utc)
-        for p in sorted(self.cursors_dir.glob("*.json")):
-            agent = p.stem
-            ts = self._read_cursor(agent).get("ts")
-            if not isinstance(ts, str) or not ts:
-                continue
-            try:
-                seen = datetime.fromisoformat(ts.replace("Z", "+00:00"))
-            except ValueError:
-                continue
-            out.append({"agent": agent, "last_seen": ts, "online": (now - seen).total_seconds() <= window_s})
-        return out
+        return [{"agent": agent, "last_seen": ts,
+                 "online": (now - datetime.fromisoformat(ts.replace("Z", "+00:00"))).total_seconds() <= window_s}
+                for agent, ts in rows if valid_timestamp(ts)]
 
-    # ---- threads / pins -----------------------------------------------
     def read_thread(self, msg_id: str) -> dict | None:
+        if self.db_path.exists():
+            return self.store.thread(msg_id)
         msgs = self.read_all()
         parent = next((m for m in msgs if m["id"] == msg_id), None)
-        if parent is None:
-            return None
-        return {"parent": parent, "replies": [m for m in msgs if m.get("parent") == msg_id]}
+        return {"parent": parent, "replies": [m for m in msgs if m.get("parent") == msg_id]} if parent else None
 
     def pins(self) -> list[dict]:
+        if self.db_path.exists():
+            return self.store.pins()
         msgs = self.read_all()
         by_id = {m["id"]: m for m in msgs}
-        pinned: list[str] = []
+        pinned = []
         for m in msgs:
             pin = m.get("pin")
             target = m["id"] if pin is True else pin if isinstance(pin, str) else None
             if target and target in by_id and target not in pinned:
                 pinned.append(target)
-            unpin = m.get("unpin")
-            if unpin in pinned:
-                pinned.remove(unpin)
+            if m.get("unpin") in pinned:
+                pinned.remove(m["unpin"])
         return [by_id[i] for i in pinned]
 
-    # ---- attachments --------------------------------------------------
     def attach_file(self, path: Path | str, name: str | None = None) -> dict:
+        self._writable()
         src = Path(path).expanduser()
-        # Flatten: a slash here would make a nested ref, and /files/{ch}/{name} is a
-        # 3-segment route, so the board could never serve it.
         name = Path(name or src.name).name
-        dest_name = f"{ulid()[:10]}-{name}"
+        dest_name = f"{ulid()}-{name}"
         dest = self.files_dir / dest_name
-        shutil.copyfile(src, dest)
+        with src.open("rb") as source, dest.open("xb") as target:
+            shutil.copyfileobj(source, target)
         mime = mimetypes.guess_type(name)[0] or "application/octet-stream"
         att = {"type": "file", "ref": f"files/{dest_name}", "name": name, "mime": mime}
         if mime == "application/pdf":
             att["pages"] = len(re.findall(rb"/Type\s*/Page(?!s)", dest.read_bytes()))
         return att
 
-    # ---- waiting ------------------------------------------------------
     def wait_for_new(self, agent: str, timeout_s: float, mention_only: bool = True,
                      poll_s: float = 0.5) -> list[dict]:
         deadline = time.monotonic() + timeout_s
         while True:
-            new = self.read_since(self.get_cursor(agent))
-            if mention_only:
-                hit = any(agent in m["mentions"] and m["from"] != agent for m in new)
-            else:
-                hit = bool(new)
-            if hit:
-                self.set_cursor(agent, new[-1]["id"])
+            new = self.consume(agent, mention_only=mention_only)
+            if new:
                 return new
             if time.monotonic() >= deadline:
                 return []

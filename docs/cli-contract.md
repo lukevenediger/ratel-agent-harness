@@ -120,3 +120,40 @@ be JSON"}` / `{"error": "body must be a JSON object"}`; unknown channel →
 newest-proposal guard: `{"error": "attachment supersedes … but the newest
 proposed clan message is …"}`. On `401`/`411`/`413`/`415` the connection is
 closed without reading the body, so a keep-alive client cannot desync.
+
+
+## Storage and migration
+
+New channels use `channels/<channel>/channel.sqlite3`, schema version 1, on local disk.
+All database processes must run on the same host; remote board clients use HTTP. Do not put
+an active channel database on a network filesystem. SQLite connections use WAL and bounded
+lock waits; write failures are reported rather than acknowledged without persistence.
+
+`--home PATH` overrides RATEL_HOME for channel commands. Public message objects keep their
+ULIDs and existing fields. `read --since ID` resolves ID to database append order, not ULID
+sorting. An unknown ID replays from the beginning. A provided `--limit` must be positive.
+A cursor only advances; presence-only touches never reset it.
+
+| Command | Contract |
+|---|---|
+| `migrate --channel NAME` | Offline legacy import; prints one JSON report with message/cursor/skipped-line counts, database path and original-file retention. Refuses an existing database. No AGENT_NAME required. |
+| `export --channel NAME` | Prints JSONL messages in append order without consuming agent cursors. No AGENT_NAME required. |
+| `tail --channel NAME [--since ID]` | Replays history (or messages after ID), then follows committed messages as JSONL. Ctrl-C exits cleanly. No AGENT_NAME required. |
+
+To migrate: stop every writer for that channel, run `ratel migrate`, inspect its counts and
+`ratel export`, then restart all writers with the new version. Old JSONL and cursor files are
+retained verbatim; they are never dual-written. Unknown legacy cursor IDs replay history.
+Malformed/torn message lines are counted and retained in the original file; duplicate IDs
+abort the whole import. Legacy attachments retain their existing references and files.
+
+Before accepting new writes, rollback is possible by stopping channel processes and moving
+the newly created database and any associated WAL/SHM files aside, then using the retained
+legacy files with the old version. After accepting new writes the retained files are stale:
+export/reconcile new messages first; do not roll back by simply deleting the database.
+Back up active databases with SQLite's backup API/tooling, or stop all channel processes before
+copying the database and attachments. Never copy only the main file of an active WAL database.
+
+The SSE endpoint emits each message's public ID as `id:`. On reconnect, `Last-Event-ID`
+takes precedence over the original `since` query parameter. Stream polling finishes its
+read transaction before writing to the browser or sleeping. The board still has exactly one
+write route; an unmigrated channel answers its approval POST with 409 and must be migrated first.

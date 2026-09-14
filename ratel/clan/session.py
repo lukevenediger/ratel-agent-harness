@@ -355,7 +355,7 @@ def new(home: Path, checkout: str | Path, issue: int, session: str | None = None
     slug = repo_slug(checkout)
     channel = session or f"{slug.split('/')[-1]}-{issue}"
     paths = ClanPaths(home, channel).ensure()
-    Bus(home, channel)                      # creates the channel dirs and bus.jsonl
+    Bus(home, channel)                      # creates the channel dirs and SQLite database
 
     over: dict[str, Any] = {}
     if oharness:
@@ -398,7 +398,8 @@ def new(home: Path, checkout: str | Path, issue: int, session: str | None = None
         ("orchestrator", checkout, _launch_argv(paths, channel, "orchestrator")),
         ("watch", paths.channel_dir, [sys.executable, "-m", "ratel.cli", "clan", "watch",
                                       "--home", str(home), "--channel", channel]),
-        ("bus", paths.channel_dir, ["tail", "-f", str(paths.channel_dir / "bus.jsonl")]))
+        ("bus", paths.channel_dir, [sys.executable, "-m", "ratel.cli", "tail",
+                                    "--home", str(home), "--channel", channel]))
     for name, cwd, argv in clan_tabs:
         tab_id = z.new_tab(name, cwd, argv)
         pane_id = z.pane_or_none(name)

@@ -1995,7 +1995,7 @@ function ingest(m, live) {
       S.approvedProposal[S.channel] = a.supersedes;
     refreshClanHeads();
   }
-  if (m.id > S.last) S.last = m.id;
+  S.last = m.id;                         // append order, independent of ULID sorting
   noteAgents(m);
   if (live) bumpChannel(m);              // a live message is activity, reply or not
   if (m.parent) {

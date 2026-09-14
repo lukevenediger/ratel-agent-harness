@@ -137,7 +137,7 @@ def test_activity_without_a_bus_file_still_returns_roles(home):
     still serve its roles rather than raise FileNotFoundError (which the board
     route does not catch)."""
     paths, _ = _seed(home, tabs={"developer": {"tab_id": 2, "pane_id": 7}})
-    paths.channel_dir.joinpath("bus.jsonl").unlink()
+    paths.channel_dir.joinpath("channel.sqlite3").unlink()
     model = S.activity(paths)
     assert [r["role"] for r in model["roles"]] == ["developer"]
 

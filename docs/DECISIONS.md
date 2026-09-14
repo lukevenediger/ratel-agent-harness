@@ -422,3 +422,90 @@ watcher's first bus write (nothing trusts the `ratel` sender, so no new trust su
 re-sanitised on read, and `reasons[]` stays a closed vocabulary. Pre-seeding opencode's
 external-directory permissions per worktree is deferred — roles are briefed to stay inside their
 worktree, and the orchestrator provisions anything from outside it.
+
+**42. Improvement programme (2026-09-14): correctness first, then operability.** The operator
+accepted the project review and SQLite recommendation and asked for a plan and implementation.
+This is the tracked plan and progress record; numbers R1–R20 refer to the review suggestions.
+Work is split into independently reviewable changes. Local branch `issue-1` starts work item 1;
+this numbering is local and does not claim a GitHub issue has been created. No live RATEL_HOME
+is migrated by development or tests.
+
+1. **SQLite message storage — implemented and verified.** Addresses R1 (delivery order), R2 (atomic cursors),
+   R3 (attachment collisions), R4 (record sizes), and starts R12/R13 (schemas/indexed reads).
+   One `channel.sqlite3` per channel, WAL, schema versioning, short transactions, bounded lock
+   waits, append sequences independent of public ULIDs. Keep TOML/Markdown and attachment bytes
+   as files. Preserve CLI/MCP message shapes. Provide explicit offline JSONL/cursor import,
+   original-file retention, JSONL export and a tail command. Move board/SSE and watcher reads
+   through Bus. Acceptance: concurrent-process posting/cursor tests, reversed ULID order,
+   large/escaped payload round trips, attachment collisions, migration repeatability/rollback,
+   CLI/MCP/SSE integration, existing suite and lint. Runtime clan state moves in work item 4.
+2. **Storage and lifecycle safety — pending.** R5: shared path validation and containment,
+   including symlinks. R6: complete message/attachment/cursor validation with malformed-record
+   diagnostics. R7: refuse dirty worktree pruning unless explicitly forced. Make proposal
+   validation and approval insertion transactional, then make approved configuration application
+   recoverable and idempotent. Acceptance: traversal/hostile-record/dirty-worktree tests and
+   competing proposal/approval tests. Preserve the documented operator/agent boundary; SQLite
+   alone does not authenticate a bus sender.
+3. **Board correctness and navigation — pending.** R8: cancellation and generation checks for
+   channel/thread requests and stale streams. R9: loading, connection, reconnect and retry UI.
+   R10: search, mention/operator filters and channel/thread permalinks. R13: bounded history
+   pages with incremental loading, without losing pinned or threaded context. Acceptance:
+   browser tests with delayed/reordered requests, reconnects, restored deep links, keyboard and
+   mobile checks, and malicious content. Keep all resources same-origin.
+4. **Maintainable runtime and observability — pending.** R11: separate board networking,
+   rendering and state; extract harness adapters and round supervision from lifecycle code.
+   R12: typed/versioned message and clan-state contracts; migrate machine-owned clan state and
+   approval application records to SQLite with recovery tests. R14: bounded stdout/stderr buffers,
+   streamed opt-in full logs and useful failure excerpts. R16: `ratel doctor` for configuration,
+   binaries, credential presence (never values), worktrees and storage. Acceptance: adapter
+   contracts, failure-path tests, bounded-memory output tests and redaction tests.
+5. **Bounded unattended runs and retention — pending.** R15: maximum rounds, elapsed time,
+   consecutive failures and provider-supported token/spend budgets, with visible stop reasons.
+   R17: dry-run archive/retention tooling that excludes active clans, retains referenced files,
+   and uses SQLite-aware backup. Acceptance: deterministic budget tests, active-clan safeguards,
+   restore checks and orphan/reference fixtures. Never silently delete operator work.
+6. **Continuous verification and onboarding — pending.** R18: concurrency and real browser
+   behaviour tests alongside existing unit/golden tests. R19: lint, frozen installs, packaged-wheel
+   smoke test, macOS CI and explicit Node availability; keep paid/live harness tests opt-in.
+   R20: restore the missing demo seed workflow and describe the channel core plus optional clan
+   runner consistently. Acceptance: clean-install/demo smoke tests, packaged static assets,
+   required CI checks, and current user/architecture/CLI docs. Each earlier item includes its own
+   tests and relevant documentation rather than deferring them all to this final item.
+
+The delivery gate for each item is its acceptance tests plus the applicable existing suite and
+Ruff. A completed item records actual verification here. Later work stays pending until delivered;
+writing this plan does not mark any review finding fixed.
+
+
+**43. SQLite replaces the shared JSONL write path (2026-09-14).** Work item 1 of Decision 42
+is implemented on `issue-1`. The core now uses one SQLite database per channel, WAL, a versioned
+schema, indexed parent/sequence reads and transactions for agent posting and cursor consumption.
+ULIDs remain public IDs, but delivery/cursor order is the database append sequence. Full text and
+code bodies are retained; attachment filenames use full ULIDs with exclusive creation. The board
+and clan log view read through Bus; SSE uses resumable event IDs. New `migrate`, `export` and
+`tail` commands preserve the file-based inspection workflow. Import is explicit and offline,
+publishes a complete temporary database without replacement, reports malformed lines, aborts on
+duplicate IDs or detected source changes, and preserves original files. No live home was migrated.
+
+*Why:* the review reproduced message loss from independent ULID ordering and non-atomic cursor
+updates, attachment overwrites and failed size budgets. SQLite replaces that custom coordination
+with a transactional, serverless store. *Cost:* local-disk-only WAL, schema migration/backup
+procedures, and old writers must be stopped before import and upgraded before restarting. The
+original JSONL becomes a pre-migration backup rather than an ongoing mirror. Unknown cursor IDs
+replay history, preferring duplicates over loss. TOML, plans, attachment bytes and clan runtime
+state stay in their current locations; atomic approval application and clan-state migration are
+still pending work items 2 and 4, not implied by this storage change.
+
+Verification: `RATEL_HOME=<scratch> uv run --frozen pytest -q --tb=short` passed **684 tests**
+with **6 opt-in tests deselected**, including real isolated Zellij tabs with scripted agents.
+Ruff and `git diff --check` passed. Regression coverage includes independent processes racing at
+channel creation, atomic posting/cursors, transaction rollback, reversed ULIDs, full large payloads,
+attachment collisions, schema rejection, offline import failure/repeatability/source changes,
+legacy pin/cursor preservation, cursor-free JSONL export/tail, and SSE Last-Event-ID replay.
+The earlier direct-Python test invocation omitted virtualenv commands from child-pane PATH;
+the prescribed uv invocation resolves that test-launch issue.
+
+Next implementation: work item 2 (shared path/field hardening, safe worktree pruning, transactional
+approval recording). Basic channel/sender-name validation and timezone checks were included in
+work item 1, and README positioning was clarified, but these do not complete R5/R6 or R20.
+All other work items remain pending with their acceptance criteria above.

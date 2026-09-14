@@ -3,7 +3,7 @@
 An idle interactive agent is blocked on its own prompt; it does not poll the
 bus. The watcher is what makes `@developer` reach a developer who is sitting
 there waiting. It is not an agent: it keeps its own offset in
-`clan.state.json` and never reads or writes `cursors/`, because those belong
+`clan.state.json` and never updates agent cursors, because those belong
 to the agents and the board's unread and presence are computed from them.
 
 It has one bus write: when a role's pane shows a harness permission dialog

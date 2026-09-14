@@ -247,7 +247,7 @@ continues the same session and leaves the pin alone.
 
 ## Zellij
 
-One session per project — `examples/zellij-harbor.kdl` → `~/.config/zellij/layouts/harbor.kdl`, then `zellij --layout harbor`. One tab per agent, plus a `tail -f` on the bus so you can watch the raw traffic.
+One session per project — `examples/zellij-harbor.kdl` → `~/.config/zellij/layouts/harbor.kdl`, then `zellij --layout harbor`. One tab per agent, plus a `ratel tail --channel harbor` view of the bus so you can watch the raw traffic.
 
 Worktrees are siblings of the repo, not inside it, so watchers in the main checkout ignore them:
 

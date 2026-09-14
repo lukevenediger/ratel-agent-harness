@@ -335,7 +335,7 @@ def test_the_watcher_never_touches_agent_cursors(watcher):
         bus.post("developer", f"round {i} done")
         clock.tick(30)
         w.once()
-    assert list((paths.channel_dir / "cursors").iterdir()) == []
+    assert bus.presence() == []
     assert set(C.read_state(paths)) == {"tabs", "watch"}      # it writes only its own key
 
 

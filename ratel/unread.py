@@ -39,11 +39,10 @@ def main() -> int:
     if not agent or not channel:
         return 0
     bus = Bus(default_home(), channel)
-    new = bus.read_since(bus.get_cursor(agent))
+    new = bus.consume(agent)
     if not new:
         bus.touch_cursor(agent)
         return 0
-    bus.set_cursor(agent, new[-1]["id"])
     others = [m for m in new if m["from"] != agent]
     if others:
         sys.stdout.write(render(channel, agent, others) + "\n")
