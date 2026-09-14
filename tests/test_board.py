@@ -1,4 +1,3 @@
-import fcntl
 import gzip
 import hashlib
 import http.client
@@ -293,7 +292,7 @@ def _seed_clan(home, ch="harbor-42"):
     hd = home / "channels" / ch / "harness" / "developer"
     hd.mkdir(parents=True)
     (hd / "context.txt").write_text("150000\n")
-    return C.ClanPaths(home, ch).state_json
+    return home / "channels" / ch / "channel.sqlite3"
 
 
 def test_clan_endpoint_shapes_the_rows(home, srv):
@@ -530,22 +529,18 @@ def test_clan_route_survives_a_non_dict_tab(home, srv):
     assert st == 200 and json.loads(body)["roles"][0]["role"] == "developer"
 
 
-def test_clan_route_serves_a_stale_snapshot_when_the_lock_is_held(home, srv):
-    """A writer holding LOCK_EX on clan.state.json must not pin a handler
-    thread: the route returns promptly with the last good snapshot and
-    stale=True."""
-    state_path = _seed_clan(home, "c")
+def test_clan_route_reads_committed_state_while_writer_is_active(home, srv):
+    """WAL readers see the committed snapshot without waiting for the writer."""
+    _seed_clan(home, "c")
     first = json.loads(get(srv, "/api/channels/c/clan")[2])
-    assert first["stale"] is False and first["roles"]
-    with open(state_path, "r") as f:
-        fcntl.flock(f, fcntl.LOCK_EX)
+    with Bus(home, "c").store.connection(write=True) as con:
+        con.execute("UPDATE clan_state SET doc=json_set(doc,'$.session','uncommitted')")
         started = time.monotonic()
         st, _, body = get(srv, "/api/channels/c/clan")
         elapsed = time.monotonic() - started
-        fcntl.flock(f, fcntl.LOCK_UN)
     data = json.loads(body)
-    assert st == 200 and data["stale"] is True
-    assert data["roles"] == first["roles"]           # the last good snapshot
+    assert st == 200 and data["stale"] is False
+    assert data["roles"] == first["roles"]
     assert elapsed < 2.0
 
 

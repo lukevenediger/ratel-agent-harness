@@ -92,6 +92,8 @@ def build_parser() -> argparse.ArgumentParser:
 
     sub.add_parser("migrate", parents=[common],
                    help="import a stopped legacy channel into SQLite; retains original files")
+    sub.add_parser("migrate-state", parents=[common], help="import stopped clan JSON state into SQLite")
+    sub.add_parser("doctor", parents=[common], help="read-only configuration and runtime checks")
     sub.add_parser("diagnostics", parents=[common],
                    help="count malformed messages and cursors without modifying storage")
     sub.add_parser("export", parents=[common], help="write channel messages as JSONL without advancing cursors")
@@ -107,6 +109,16 @@ def run(args: argparse.Namespace) -> Any:
     if args.cmd == "clan":
         from .clan.cli import run as clan_run
         return clan_run(args)
+    if args.cmd == "doctor":
+        from .doctor import diagnose
+        return diagnose(args.home or default_home(), args.channel or os.environ.get("CHANNEL"))
+    if args.cmd == "migrate-state":
+        from .clan.config import ClanPaths
+        from .clan.state import migrate as migrate_state
+        channel = args.channel or os.environ.get("CHANNEL")
+        if not channel:
+            raise ValueError("set CHANNEL or pass --channel")
+        return migrate_state(ClanPaths(args.home or default_home(), channel))
     if args.cmd in ("migrate", "export", "tail", "diagnostics"):
         channel = args.channel or os.environ.get("CHANNEL")
         if not channel:
@@ -165,6 +177,8 @@ def main(argv: list[str] | None = None) -> None:
         return
     if result is not None:              # `clan launch` execs; `clan watch` blocks
         _emit(result, args.pretty)
+        if args.cmd == "doctor" and not result["ok"]:
+            raise SystemExit(1)
 
 
 if __name__ == "__main__":

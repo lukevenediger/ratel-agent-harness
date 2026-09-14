@@ -88,7 +88,7 @@ def test_version_one_is_upgraded_without_losing_messages(bus):
     upgraded = Bus(bus.home, bus.channel)
     assert upgraded.read_all() == [msg]
     with upgraded.store.connection() as con:
-        assert con.execute('PRAGMA user_version').fetchone()[0] == 2
+        assert con.execute('PRAGMA user_version').fetchone()[0] == 3
         assert Store.pending(con) is None
 
 

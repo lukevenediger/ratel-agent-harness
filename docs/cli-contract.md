@@ -18,9 +18,7 @@ and read semantics cannot drift between them.
   existing `~/.agentchat` stays reachable until the operator `mv`s it.
   `CLAN_NO_NESTED=1` makes `ratel clan new`, `up` and `launch` exit
   non-zero without doing anything (docs/DECISIONS.md, Decision 29).
-  `--agent` and `--channel` override the env per invocation. `--home` exists on
-  the `clan` subcommands only — channel commands take `RATEL_HOME` from the
-  environment.
+  `--agent` and `--channel` override the env per invocation. `--home PATH` overrides `RATEL_HOME` for channel and clan commands.
 - **Errors:** non-zero exit with `ratel <cmd>: <message>` on stderr and
   nothing (or no new value) on stdout.
 - **Agents in tabs use MCP** (`ratel-mcp`, one stdio server per agent);
@@ -65,7 +63,7 @@ channel, zellij session and config all share one name.
 Notes:
 
 - `clan new` records `checkout` and the orchestrator's writer bit in
-  `clan.state.json` at creation; `clan up` pins each role's writer bit as it
+  SQLite clan state at creation; `clan up` pins each role's writer bit as it
   starts them. Later commands refuse to run against a `clan.toml` that changed
   either.
 - `clan status` reports the *effective* harness kind from state — on an
@@ -126,7 +124,7 @@ closed without reading the body, so a keep-alive client cannot desync.
 
 ## Storage and migration
 
-New channels use `channels/<channel>/channel.sqlite3`, schema version 2, on local disk.
+New channels use `channels/<channel>/channel.sqlite3`, schema version 3, on local disk.
 All database processes must run on the same host; remote board clients use HTTP. Do not put
 an active channel database on a network filesystem. SQLite connections use WAL and bounded
 lock waits; write failures are reported rather than acknowledged without persistence.
@@ -185,3 +183,30 @@ Board links retain the original `#channel` form and add optional hash parameters
 `#channel?thread=ID&q=search&mention=agent&operator=1`. Browser Back/Forward restores this
 view. Token query parameters are removed before saving navigation history and are never
 included in Channel link or Thread link. Missing channels/threads show recoverable errors.
+
+
+## Runtime state and diagnostics
+
+`migrate-state --channel NAME` imports legacy `clan.state.json` into the channel database.
+Stop the clan and all channel processes first; migrate legacy messages with `migrate` first
+if needed. The command prints `{"version": 1, "original_retained": "<path>"}`. It refuses
+malformed state or an existing SQLite state row and retains the original file unchanged.
+Legacy state remains readable, but runtime writes require this explicit import. New clans
+use SQLite immediately. Schema 3 adds versioned clan state and a monotonic revision; older
+schema 1/2 databases upgrade transactionally on writes. State payload version 1 retains
+unknown fields; unsupported versions fail explicitly. Messages without a `version` field
+use message contract version 1; an explicit unsupported version is rejected.
+
+`doctor [--channel NAME]` performs read-only local checks without creating a home or database.
+It prints `{"ok": true|false, "checks": [{"check", "status", "detail"}]}`. Status is `ok`,
+`warning`, or `error`; errors produce exit 1 **after** printing the report, while warnings
+alone exit 0. Checks cover SQLite integrity and malformed-record counts, pending approvals,
+clan/catalog configuration, binaries, required credential presence, and recorded worktrees.
+Credentials are reported only as present/not set. Without a channel it checks the home and
+suggests selecting a channel. It neither repairs state nor runs provider authentication.
+
+Headless round records retain bounded stdout and stderr tails: at most 40 chunks of up to
+4096 characters and 65,536 characters per stream. Records include `stderr`, per-stream
+`truncated` flags and `logs` filenames. `CLAN_ROUND_LOG=full` streams complete output into
+exclusive per-round stdout/stderr files in the role's harness directory; it does not enlarge
+in-memory buffers. `CLAN_ROUND_TIMEOUT` must be a finite positive number of seconds.

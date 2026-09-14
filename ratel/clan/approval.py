@@ -1,6 +1,6 @@
-"""Durable approval intent and repeatable application to config/state files.
+"""Durable approval intent and repeatable application to configuration and SQLite state.
 
-An intent is committed before either file changes. Lifecycle commands refuse
+An intent is committed before configuration or state changes. Lifecycle commands refuse
 pending applications; `clan approve` replays the saved snapshot after a crash.
 No shell commands run while the database transaction is held.
 """
@@ -25,7 +25,7 @@ def recover(paths: ClanPaths, store):
             state.update(writers={n: r.writer for n, r in cfg.roles.items()},
                          briefs={n: r.brief for n, r in cfg.roles.items()})
 
-        update_state(paths, apply, recovery=snapshot["state"])
+        update_state(paths, apply, recovery=snapshot["state"], con=con)
         con.execute("UPDATE approval_applications SET pending=0 WHERE approval_id=?", (approval_id,))
         return approval_id, cfg.to_dict()
 

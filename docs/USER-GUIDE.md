@@ -71,7 +71,7 @@ zellij attach harbor-15-0910-1423       # channel is <repo>-<issue>; the session
 The channel is `harbor-15` and stays that — it is what `--channel` and the board use. The
 **zellij session** is the channel plus the start time, because zellij keeps exited sessions listed
 for `attach` to resurrect and a restart must not collide with its predecessor. Take the name from
-`clan new`, from `clan status`, or from `clan.state.json`.
+`clan new`, from `clan status`, or from the SQLite clan state.
 
 A zellij socket path caps at 103 bytes and macOS `$TMPDIR` eats ~49 of them, so a long name gets
 shortened — the stamp drops its date first (`-0910-1423` → `-1423`), and only then does the

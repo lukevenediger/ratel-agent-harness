@@ -6,8 +6,25 @@ approval time: old messages must remain readable when a preset is removed.
 import math
 import re
 from datetime import datetime
+from typing import NotRequired, TypedDict
 
 from .ulid import is_ulid
+
+MESSAGE_VERSION = 1
+
+
+MessageAuthor = TypedDict("MessageAuthor", {"from": str})
+
+
+class Message(MessageAuthor):
+    id: str
+    ts: str
+    text: str
+    mentions: list[str]
+    attachments: list[dict]
+    parent: str | None
+    pin: bool | str
+    version: NotRequired[int]
 
 
 def validate_name(value: str, kind: str = "channel") -> str:
@@ -80,9 +97,11 @@ def validate_attachment(att):
     return att
 
 
-def validate_message(doc):
+def validate_message(doc) -> Message:
     if not isinstance(doc, dict) or not is_ulid(doc.get("id")):
         raise ValueError("message id: must be a ULID")
+    if type(doc.get("version", MESSAGE_VERSION)) is not int or doc.get("version", MESSAGE_VERSION) != MESSAGE_VERSION:
+        raise ValueError("unsupported message version")
     validate_name(doc.get("from"), "agent")
     if not isinstance(doc.get("text"), str):
         raise ValueError("message text: must be a string")

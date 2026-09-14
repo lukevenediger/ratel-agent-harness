@@ -170,7 +170,8 @@ def test_state_read_modify_write_keeps_other_keys(paths):
     state = C.read_state(paths)
     assert state == {"session": "harbor-42", "tabs": {"developer": {"pane_id": 2}},
                      "watch": {"last_id": "01ABC"}}
-    assert json.loads(paths.state_json.read_text()) == state
+    assert not paths.state_json.exists()
+    assert C.read_state(paths) == state
 
 
 def test_state_tolerates_an_empty_or_corrupt_file(paths):

@@ -206,7 +206,7 @@ usage record — nothing is estimated from scrollback:
 - **Claude** (`claude`, `claude-p`): the transcript at
   `~/.claude/projects/<cwd-slug>/<session-id>.jsonl`. Interactive tabs are
   launched with an explicit `--session-id <uuid4>` recorded in
-  `clan.state.json` alongside an ISO-UTC `launched`, so the reader opens
+  SQLite clan state alongside an ISO-UTC `launched`, so the reader opens
   exactly that file. Without a session id it falls back to the newest file
   whose first `cwd`-carrying record matches the tab's cwd (the literal first
   line can be a `custom-title` record with `cwd: null`) **and** whose last

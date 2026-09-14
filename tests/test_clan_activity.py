@@ -418,7 +418,7 @@ def test_activity_reads_never_write_a_channel_dir(home):
     paths, _ = _seed(home, tabs={"developer": {"tab_id": 2, "pane_id": 7}},
                      watch={"nudged": {"developer": {"at": now_iso(), "ts": 1.0}}},
                      contexts={"developer": 100})
-    state_p = paths.state_json
+    state_p = paths.channel_dir / "channel.sqlite3"
     before = (state_p.read_bytes(), state_p.stat().st_mtime_ns)
     S.activity(paths, samples={})
     assert (state_p.read_bytes(), state_p.stat().st_mtime_ns) == before

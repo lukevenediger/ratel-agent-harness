@@ -16,10 +16,6 @@ import signal
 import subprocess
 import sys
 import tempfile
-import threading
-import time
-import traceback
-import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import TextIO
@@ -27,7 +23,6 @@ from typing import TextIO
 from ..paths import confined
 from .config import ClanConfig, ClanPaths, RoleSpec, deep_merge, effort_word, load_models, update_state
 from .gitwt import exclude_in_worktree
-from .loop import NudgeLoop
 from .tools import require_binary
 
 PKG = Path(__file__).parent
@@ -382,99 +377,9 @@ PROMPT_WINDOW_S = 30.0
 AUTH_MARKERS = ("Not logged in",)               # a headless round cannot /login either
 
 
-def launch_argv(cfg: ClanConfig, role: str, harness_dir: Path,
-                initial_prompt: str | None = None, unattended: bool = False,
-                round_n: int = 1, channel_dir: Path | None = None,
-                project_dir: Path | None = None, session_id: str | None = None,
-                home: Path | None = None) -> tuple[list[str], dict[str, str]]:
-    """(argv, extra env). The prompt is last — except where a trailing variadic
-    flag would eat it: an unattended `claude-p` puts the prompt BEFORE its
-    --allowedTools list (measured: `--allowedTools` is variadic and swallows a
-    trailing prompt).
-
-    Headless kinds take a `round_n`: the kickoff is round 1 and every nudge
-    gets its own process, resuming the previous conversation only from round 2
-    on (a fresh cwd has no conversation to continue).
-    """
-    spec: RoleSpec = cfg.roles[role]
-    prompt = initial_prompt or default_prompt(cfg, role)
-    if spec.harness == "fake":
-        # Tier 1: a scripted agent driven by the same nudges as a real one.
-        return (["ratel-fake-harness", "--playbook", str(harness_dir / "playbook.toml"),
-                 "--log", str(harness_dir / "nudges.log")], {})
-    if spec.harness == "opencode-run":
-        # --dir pins the project: `-c` continues "the last session" GLOBALLY, so
-        # round 2+ resumes this role's own session by id (captured from round
-        # 1's --format json output) instead.
-        argv = ["opencode", "run", "--dir", str(project_dir or cfg.checkout),
-                "--pure", "--auto", "--format", "json", "--model", spec.model]
-        if round_n > 1 and session_id:
-            argv += ["-s", session_id]
-        elif round_n > 1:
-            argv.append("-c")            # no id captured: best effort, never silently global
-        return argv + [prompt], {"OPENCODE_CONFIG": str(harness_dir / "opencode.json")}
-    if spec.harness == "claude-p":
-        argv = _claude_base_argv(spec, role, harness_dir, home=home)
-        argv[1:1] = ["-p"]
-        extra: dict[str, str] = {}
-        if round_n == 1:
-            # pin the headless transcript the same way the interactive kind does:
-            # a fixed file `projects/<cwd-slug>/<id>.jsonl` measurement can read.
-            # Round 2+ resumes with --continue, which picks this same session.
-            sid = str(uuid.uuid4())
-            argv += ["--session-id", sid]
-            extra = {"RATEL_SESSION_ID": sid}
-        elif round_n > 1:
-            argv.append("--continue")
-        if unattended:
-            argv.append("--permission-mode")
-            argv.append("acceptEdits")
-            argv.append(prompt)              # BEFORE the variadic flag: see the docstring
-            # The channel dir is outside cwd and Claude confines Read/Write/Edit
-            # to its working directories — a permission rule alone is not enough
-            # (/add-dir is unavailable in -p), so grant the dir itself, variadic
-            # flags after the prompt.
-            channel_dir = channel_dir or harness_dir.parent.parent
-            # Geometry, not rules: with acceptEdits, everything inside an
-            # --add-dir tree is auto-accept territory and per-path Edit rules
-            # never enter the decision (measured on claude 2.1.263). So add-dir
-            # only the trees a role may write. clan.state.json sits at the
-            # channel root, outside every add-dir, for every role. The channel
-            # ROOT is deliberately excluded for every role, including the
-            # orchestrator: a role that cannot find a file there needs its
-            # brief corrected, not the root granted — granting the root
-            # re-opens the whole control plane (state, peer harness dirs).
-            clan_dir = channel_dir / "clan"
-            add_dirs = [channel_dir / "plans", channel_dir / "files", harness_dir]
-            if spec.brief == "orchestrator":         # owns clan.toml + the plans
-                add_dirs.append(clan_dir)
-            for d in add_dirs:
-                argv += ["--add-dir", str(d)]
-            # Per-path Read()/Edit() rules are deleted, deliberately: under
-            # acceptEdits the --add-dir set IS the file boundary and the rules
-            # are inert under both modes (measured on claude 2.1.263). Bash(…)
-            # and mcp__… rules are NOT inert — they are the command/MCP
-            # boundary and do narrow (see unattended_tools).
-            argv += ["--allowedTools", "Bash(ls:*)"]
-            for tool in unattended_tools(spec):
-                argv += ["--allowedTools", tool]
-            return argv, extra
-        return argv + [prompt], extra
-    if spec.harness == "opencode":
-        argv = ["opencode", "--pure", "--model", spec.model]
-        if unattended:
-            argv.append("--auto")
-        return argv + ["--prompt", prompt], {"OPENCODE_CONFIG": str(harness_dir / "opencode.json")}
-    argv = _claude_base_argv(spec, role, harness_dir, home=home)
-    argv[1:1] = ["--name", role]
-    # a fixed session id: the transcript lands at projects/<cwd-slug>/<id>.jsonl
-    # where context measurement can find it, instead of under an opaque id the
-    # tab would have to guess. Headless claude-p gets one on round 1 only.
-    sid = str(uuid.uuid4())
-    argv += ["--session-id", sid]
-    if unattended:
-        argv += ["--permission-mode", "acceptEdits"]
-    return argv + [prompt], {"RATEL_SESSION_ID": sid}
+def launch_argv(*args, **kwargs):
+    from .adapters import launch_argv as build
+    return build(sys.modules[__name__], *args, **kwargs)
 
 
 def install_skills(worktree: str | Path, specs: list[str]) -> list[str]:
@@ -560,156 +465,6 @@ def record_round_session(paths: ClanPaths, role: str, extra: dict) -> None:
         record_launched(paths, role)
 
 
-def _run_headless(cfg: ClanConfig, role: str, hd: Path, channel_dir: Path,
-                  env: dict[str, str], unattended: bool, stdin: TextIO | None,
-                  paths: ClanPaths, project_dir: Path | None = None) -> None:
-    """One subprocess per round: the kickoff, then one per nudge line.
-
-    The child gets stdin from /dev/null — it must never see the pane tty the
-    watcher types nudges into, or it eats the next round's line. stdout is
-    pumped through to the pane as it arrives (the pane is the agent's face)
-    while being buffered for the rounds.jsonl record; CLAN_ROUND_TIMEOUT
-    seconds (default 3600) kill a wedged round and the loop moves on.
-    """
-    rounds_path = confined(hd, "rounds.jsonl")
-    session_file = confined(hd, "opencode-session")
-    timeout_s = float(os.environ.get("CLAN_ROUND_TIMEOUT") or DEFAULT_ROUND_TIMEOUT_S)
-    state = {"n": 0, "session_id": session_file.read_text().strip()
-             if session_file.exists() else None}
-    current: dict = {}
-
-    def _kill_current() -> None:
-        pid = current.get("pid")
-        if pid:
-            try:                                 # the round group, not just the child
-                os.killpg(os.getpgid(pid), signal.SIGKILL)
-            except (ProcessLookupError, PermissionError):
-                pass
-
-    def _on_signal(signum, _frame) -> None:
-        # `clan down` kills the pane; the round, in its own session, would
-        # otherwise outlive it. Take the group with us.
-        _kill_current()
-        sys.exit(f"ratel clan launch: round killed by signal {signum}")
-
-    for sig in ("SIGTERM", "SIGHUP"):
-        if hasattr(signal, sig):
-            signal.signal(getattr(signal, sig), _on_signal)
-
-    def run_round(prompt: str) -> None:
-        reset = False
-        if confined(hd, "reset").exists():          # `clan checkpoint` left a rewind marker
-            confined(hd, "reset").unlink()
-            reset = True
-            state["n"] = 0                   # this round launches as round 1: no --continue / -s
-            state["session_id"] = None
-            session_file.unlink(missing_ok=True)
-        state["n"] += 1
-        round_start = time.monotonic()
-        logged: list[str] = []
-        out_lines: list[str] = []
-        err_lines: list[str] = []
-        timed_out = False
-        error: str | None = None
-        prompt_line: list[str] = []                 # first interactive-prompt line, if any
-        prompt_hit = threading.Event()
-        auth_hit = threading.Event()
-        candidate: list[str] = []                   # last marker line, cleared by any output
-        last_output = {"t": time.monotonic()}
-
-        def pump(stream, sink) -> None:
-            for line in stream:
-                last_output["t"] = time.monotonic()
-                sink(line)
-                if time.monotonic() - round_start <= PROMPT_WINDOW_S:
-                    if any(m in line for m in PROMPT_MARKERS):
-                        if not candidate:           # keep the FIRST marker line: the question
-                            candidate[:] = [line.strip()]
-                    else:
-                        candidate.clear()           # prose quoting a marker moves on
-                if not auth_hit.is_set() and any(m in line for m in AUTH_MARKERS):
-                    auth_hit.set()
-        try:
-            argv, extra = launch_argv(cfg, role, hd, initial_prompt=prompt,
-                                      unattended=unattended, round_n=state["n"],
-                                      channel_dir=channel_dir, project_dir=project_dir,
-                                      session_id=state.get("session_id"),
-                                      home=paths.home)
-            if state["n"] == 1:                     # a session begins: round 1, or the reset round
-                record_round_session(paths, role, extra)   # (round 1's --session-id, or the gate)
-            logged = list(argv)                     # prompt-free, wherever it sits
-            logged.pop(argv.index(prompt))
-            if "--append-system-prompt" in logged:  # the brief as its path, not its text
-                logged[logged.index("--append-system-prompt") + 1] = str(confined(hd, "brief.md"))
-            pid_file = confined(hd, "round.pid")
-            p = subprocess.Popen(argv, env={**env, **extra}, stdin=subprocess.DEVNULL,
-                                 stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
-                                 start_new_session=True)
-            current["pid"] = p.pid               # `clan down` finds us here if the pane dies
-            try:
-                pgid = os.getpgid(p.pid)         # start_new_session: pgid == pid
-            except ProcessLookupError:
-                pgid = p.pid
-            pid_file.write_text(json.dumps(
-                {"pid": p.pid, "pgid": pgid, "started": _ps_lstart(p.pid)}))
-            t_out = threading.Thread(
-                target=pump, args=(p.stdout, lambda line: (out_lines.append(line),
-                                                           sys.stdout.write(line), sys.stdout.flush())))
-            t_err = threading.Thread(
-                target=pump, args=(p.stderr, lambda line: (err_lines.append(line),
-                                                           sys.stderr.write(line))))
-            t_out.start()
-            t_err.start()
-            deadline = time.monotonic() + timeout_s
-            while True:
-                try:
-                    p.wait(timeout=0.5)
-                    break
-                except subprocess.TimeoutExpired:
-                    pass
-                if candidate and time.monotonic() - last_output["t"] >= PROMPT_QUIET_S:
-                    prompt_line.append(candidate[0])          # quiet on the marker: a real dialog
-                    prompt_hit.set()
-                if prompt_hit.is_set() or auth_hit.is_set():   # fail fast, say why
-                    break
-                if time.monotonic() >= deadline:
-                    timed_out = True
-                    break
-            if timed_out or prompt_hit.is_set() or auth_hit.is_set():
-                try:                                # kill the whole group: a grandchild holding
-                    os.killpg(os.getpgid(p.pid), signal.SIGKILL)   # the pipe must not wedge us
-                except (ProcessLookupError, PermissionError, AttributeError):
-                    p.kill()
-            p.wait()
-            for t in (t_out, t_err):                # bounded: a surviving grandchild cannot hang us
-                t.join(timeout=PUMP_JOIN_TIMEOUT_S)
-        except Exception as exc:                    # even the kickoff round must not kill the tab
-            traceback.print_exc(file=sys.stderr)
-            error = f"{type(exc).__name__}: {exc}"
-        if os.environ.get("CLAN_ROUND_LOG") == "full":
-            output = "".join(out_lines)
-        else:
-            output = "".join(out_lines[-ROUND_OUTPUT_LINES:])
-        if prompt_hit.is_set() and not error:
-            error = f"interactive prompt the round cannot answer: {prompt_line[0]}"
-        if auth_hit.is_set() and not error:
-            error = "the harness is not authenticated — run its login once as the operator"
-        current.pop("pid", None)
-        confined(hd, "round.pid").unlink(missing_ok=True)
-        session_id = extract_opencode_session("".join(out_lines))
-        if session_id:                           # opencode: resume THIS session, never a global -c
-            state["session_id"] = session_id
-            session_file.write_text(session_id)
-        record = {"ts": datetime.now(timezone.utc).isoformat(timespec="seconds")
-                       .replace("+00:00", "Z"),
-                  "round": state["n"], "prompt": prompt, "argv": logged,
-                  "returncode": "prompt" if prompt_hit.is_set() else
-                        "auth" if auth_hit.is_set() else
-                        "timeout" if timed_out else
-                        "error" if error else p.returncode,
-                  "output": error or output, "reset": reset}
-        with open(rounds_path, "a") as f:
-            f.write(json.dumps(record) + "\n")
-
-    run_round(default_prompt(cfg, role))     # the kickoff runs before the loop reads stdin
-    NudgeLoop(run_round, stdin=stdin, log=confined(hd, "nudges.log")).run()
+def _run_headless(*args, **kwargs):
+    from .supervision import run
+    return run(sys.modules[__name__], *args, **kwargs)

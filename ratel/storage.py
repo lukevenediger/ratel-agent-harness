@@ -16,7 +16,7 @@ from .paths import confined
 from .schema import is_message, valid_timestamp, validate_limit, validate_message, validate_name
 
 NO_PROPOSAL_CHECK = object()
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 APPLICATIONS = (
     "CREATE TABLE approval_applications (approval_id TEXT PRIMARY KEY, config TEXT NOT NULL CHECK(json_valid(config)), "
     "pending INTEGER NOT NULL CHECK(pending IN (0,1)))",
@@ -54,7 +54,7 @@ class Store:
                               timeout=5, isolation_level=None)
         try:
             con.execute("PRAGMA foreign_keys=ON")
-            if not create and con.execute("PRAGMA user_version").fetchone()[0] not in (1, SCHEMA_VERSION):
+            if not create and con.execute("PRAGMA user_version").fetchone()[0] not in (1, 2, SCHEMA_VERSION):
                 raise ValueError("unsupported channel database schema; upgrade ratel before opening it")
             if write:
                 con.execute("BEGIN IMMEDIATE")
@@ -77,7 +77,7 @@ class Store:
             while True:
                 try:
                     version = con.execute("PRAGMA user_version").fetchone()[0]
-                    if version not in (0, 1, SCHEMA_VERSION):
+                    if version not in (0, 1, 2, SCHEMA_VERSION):
                         raise ValueError("unsupported channel database schema; upgrade ratel before opening it")
                     con.execute("PRAGMA journal_mode=WAL")
                     break
@@ -100,6 +100,10 @@ class Store:
             if version in (0, 1):
                 for sql in APPLICATIONS:
                     con.execute(sql)
+            if version in (0, 1, 2):
+                con.execute("CREATE TABLE IF NOT EXISTS clan_state (singleton INTEGER PRIMARY KEY CHECK(singleton=1), "
+                            "version INTEGER NOT NULL, revision INTEGER NOT NULL, doc TEXT NOT NULL "
+                            "CHECK(json_valid(doc) AND json_type(doc)='object'))")
                 con.execute(f"PRAGMA user_version={SCHEMA_VERSION}")
             elif version != SCHEMA_VERSION:
                 raise ValueError("unsupported channel database schema; upgrade ratel before opening it")

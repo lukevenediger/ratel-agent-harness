@@ -8,9 +8,6 @@ for those names.
 from __future__ import annotations
 
 import datetime
-import fcntl
-import json
-import os
 import re
 import tomllib
 from dataclasses import dataclass, field
@@ -313,45 +310,12 @@ class ClanConfig:
         return cls.from_dict(tomllib.loads(paths.clan_toml.read_text()), catalog)
 
 
-# ---- state (tool-owned; agents never write it) --------------------------
+# Public facade retained for callers; persistence lives in state.py.
 def read_state(paths: ClanPaths) -> dict:
-    p = paths.state_json
-    if not p.exists():
-        return {}
-    try:
-        with p.open() as f:
-            fcntl.flock(f, fcntl.LOCK_SH)
-            doc = json.loads(f.read() or "{}")
-        return doc if isinstance(doc, dict) else {}
-    except json.JSONDecodeError:
-        return {}
+    from .state import read
+    return read(paths)
 
 
-def update_state(paths: ClanPaths, mutate: Callable[[dict], Any], *, recovery: dict | None = None) -> dict:
-    """Read-modify-write under flock, so `watch` and `up` can run at once."""
-    paths.ensure().state_json.touch()
-    with open(paths.state_json, "r+") as f:
-        fcntl.flock(f, fcntl.LOCK_EX)
-        try:
-            raw = f.read()
-            try:
-                state = json.loads(raw) if raw.strip() else {}
-            except json.JSONDecodeError:
-                if recovery is None:
-                    raise ValueError("clan state contains invalid JSON") from None
-                state = dict(recovery)
-            if not isinstance(state, dict):
-                if recovery is None:
-                    raise ValueError("clan state must be a JSON object")
-                state = dict(recovery)
-            if recovery is not None:
-                state = {**recovery, **state}
-            mutate(state)
-            f.seek(0)
-            f.truncate()
-            json.dump(state, f, indent=2, sort_keys=True)
-            f.flush()
-            os.fsync(f.fileno())
-        finally:
-            fcntl.flock(f, fcntl.LOCK_UN)
-    return state
+def update_state(paths: ClanPaths, mutate: Callable[[dict], Any], *, recovery: dict | None = None, con=None) -> dict:
+    from .state import update
+    return update(paths, mutate, recovery=recovery, con=con)

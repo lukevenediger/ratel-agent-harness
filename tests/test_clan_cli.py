@@ -1318,12 +1318,13 @@ def test_approval_recovers_interrupted_state_write(home, claned, monkeypatch):
     real_update = approval.update_state
 
     def interrupted(*args, **kwargs):
-        claned.state_json.write_text('{"partial":')
+        real_update(*args, **kwargs)  # transaction must roll this state update back
         raise OSError('simulated interruption')
 
     monkeypatch.setattr(approval, 'update_state', interrupted)
     with pytest.raises(OSError, match='interruption'):
         clansession.approve(claned, msg_id)
+    assert C.read_state(claned) == before
     with pytest.raises(SystemExit, match='pending'):
         clansession.status(claned)
     monkeypatch.setattr(approval, 'update_state', real_update)

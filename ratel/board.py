@@ -30,12 +30,23 @@ from .clan.config import CATALOG_ERRORS, ClanConfig, ClanPaths, load_catalog, re
 from .clan.config import catalog as clan_catalog
 from .clan.proposal import validate_clan_attachment
 from .clan.session import ClanError, activity
+from .clan.state import revision as state_revision
 from .paths import channel_path, confined
 from .schema import validate_name
 from .ulid import is_ulid
 from .unfurl import unfurl
 
 STATIC = Path(__file__).parent / "static"
+
+
+def board_page() -> bytes:
+    """Assemble source modules without a build step or cross-origin assets."""
+    script = "\n".join((STATIC / name).read_text() for name in
+                       ("board-state.js", "board-render.js", "board-network.js"))
+    return (STATIC / "board.html").read_text().replace("<!-- BOARD_SCRIPTS -->",
+                                                      "<script>\n" + script + "</script>").encode()
+
+
 CHANNEL_RE = re.compile(r"^[A-Za-z0-9_.-]+$")
 # `repo` lands in the sidebar from the agent-writable clan.toml. A conservative
 # owner/name slug only; anything else is dropped, never escaped-and-shown.
@@ -175,10 +186,10 @@ def _read_state_nb(path: Path, attempts: int = 3, delay_s: float = 0.02) -> dict
 def _clan_signature(home: Path, ch: str) -> str:
     """A change signature over `clan.state.json` (mtime, size) and each
     `harness/<role>` directory mtime (it moves when `round.pid` is created or
-    unlinked). Stats only — no contents, no parser — so the SSE loop stays
+    unlinked). File stats plus the SQLite state revision keep the SSE loop
     cheap enough to wake every 0.5s."""
     base = home / "channels" / ch
-    parts: list[str] = []
+    parts: list[str] = [f"revision:{state_revision(ClanPaths(home, ch))}"]
     state = base / "clan.state.json"
     try:
         st = state.stat()
@@ -256,7 +267,7 @@ class BoardHandler(BaseHTTPRequestHandler):
         parts = [p for p in path.split("/") if p]
         try:
             if path == "/":
-                return self._send(200, (STATIC / "board.html").read_bytes(), "text/html; charset=utf-8",
+                return self._send(200, board_page(), "text/html; charset=utf-8",
                                   {"Cache-Control": "no-store",
                                    # the page holds the write token in localStorage: frame-busters
                                    # and a tight CSP are defence in depth against a future injection
@@ -456,9 +467,14 @@ class BoardHandler(BaseHTTPRequestHandler):
             return {"roles": []}                  # no clan here (yet), or a drifted one
 
     def _state_snapshot(self, ch: str) -> tuple[dict, bool]:
-        """A non-blocking shared read of `clan.state.json`, falling back to the
+        """Read committed SQLite state, or legacy JSON without blocking on flock.
+
+        Legacy reads fall back to the
         last snapshot served for this channel with `stale=True` when a writer
         holds the lock. Reads never write."""
+        paths = ClanPaths(self.home, ch)
+        if state_revision(paths) is not None:
+            return read_state(paths), False
         store = self.server.snapshots
         try:
             state = _read_state_nb(ClanPaths(self.home, ch).state_json)

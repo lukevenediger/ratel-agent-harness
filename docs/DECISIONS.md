@@ -452,7 +452,7 @@ is migrated by development or tests.
    pages with incremental loading, without losing pinned or threaded context. Acceptance:
    browser tests with delayed/reordered requests, reconnects, restored deep links, keyboard and
    mobile checks, and malicious content. Keep all resources same-origin.
-4. **Maintainable runtime and observability — pending.** R11: separate board networking,
+4. **Maintainable runtime and observability — implemented and verified.** R11: separate board networking,
    rendering and state; extract harness adapters and round supervision from lifecycle code.
    R12: typed/versioned message and clan-state contracts; migrate machine-owned clan state to
    SQLite alongside the approval application records, with recovery tests. R14: bounded stdout/stderr buffers,
@@ -576,3 +576,37 @@ guard was then verified by rerunning the expanded Chromium suite (**1 passed**).
 JavaScript syntax checking and `git diff --check` pass. The temporary preview server and
 isolated agent-browser session were stopped after visual verification. No live home was used.
 Work item 4 (runtime structure, state storage and observability) remains next.
+
+
+**46. Transactional runtime state and bounded observability (2026-09-14).** Work item 4
+of Decision 42 stays on `issue-1`, as requested by the operator. SQLite schema 3 adds a
+singleton clan-state document with independent payload version 1 and a monotonic revision.
+Updates serialize under a write transaction; failure rolls back both state and revision.
+Approval recovery now commits state and intent completion together after replacing clan.toml.
+The durable intent still handles interruption across the TOML/database boundary. Legacy state
+is read-only until explicit offline `ratel migrate-state`; import retains the original JSON.
+No live home was read or migrated. Message contracts accept absent/version-1 markers and reject
+unsupported explicit versions without changing existing message output shapes.
+
+Harness argument construction and round supervision now live in separate modules behind the
+existing launch facade. Output is read in bounded chunks and retains at most 65,536 characters
+and 40 chunks per stream. Round records include stderr and truncation flags; opt-in full logs
+stream to exclusive per-round files. Incremental session-ID capture preserves resume behavior
+when the initial ID has scrolled out of the tail. Output capture errors become failed rounds;
+timeouts and process-group cleanup remain in the supervisor. Full-log disk retention and
+unattended-run budgets remain work item 5.
+
+The board's state/routing, rendering and networking sources are separate files assembled into
+the existing page without a build step. SQLite revisions trigger clan updates and WAL snapshots
+remain readable while a writer is active. `ratel doctor` performs read-only storage, catalog,
+binary, credential-presence and recorded-worktree checks. It prints structured warnings/errors,
+never credential values or raw exception text, and does not authenticate with providers.
+
+Verification: `NODE_PATH=<Playwright node_modules> RATEL_HOME=<scratch> uv run --frozen
+pytest -q --tb=short` passed **754 tests**, with **6 opt-in tests deselected**, including browser
+acceptance and isolated real Zellij sessions. Ruff and `git diff --check` passed. Added coverage
+checks concurrent state updates, transaction rollback during approval recovery, explicit and
+failed migration, unsupported versions, WAL reads during writes, bounded unbroken output,
+streamed logs, early session-ID recovery, stderr/capture failures, doctor redaction and its CLI
+error report. The board JavaScript was also compared against its previous inline source to
+verify that the split preserved content. Work item 5 is next; work items 5 and 6 remain pending.

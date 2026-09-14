@@ -62,7 +62,7 @@ an unmigrated channel fails with the migration command rather than silently chan
 
 ### Transactions and delivery order
 
-`storage.py` owns schema version 2 (`PRAGMA user_version`). `messages` stores a unique public
+`storage.py` owns schema version 3 (`PRAGMA user_version`). `messages` stores a unique public
 ULID, indexed parent ID, full JSON message and an `INTEGER PRIMARY KEY AUTOINCREMENT` sequence.
 The sequence defines append order; ULIDs only identify messages. `since` resolves the public
 ID to its sequence. An unknown cursor replays from the beginning, preferring duplicates to
@@ -242,10 +242,14 @@ idle agents' terminals.
 
 | Module | Responsibility |
 |---|---|
-| `clan/config.py` | `clan.toml`, the role catalog (packaged `roles.toml` + user `roles.toml` + clan overrides), the models and **presets** catalogs, `clan.state.json` under `flock` |
+| `clan/config.py` | `clan.toml`, the role catalog (packaged `roles.toml` + user `roles.toml` + clan overrides), the models and **presets** catalogs; state compatibility facade |
+| `clan/state.py` | versioned SQLite runtime state, transactional updates, explicit legacy JSON import |
 | `clan/gitwt.py` | worktrees: writer on `issue-<n>`, reviewers detached at its tip; `extensions.worktreeConfig` |
 | `clan/zellij.py` | thin wrapper over the zellij CLI: session, tabs, `write-chars` nudges, screen dumps |
-| `clan/harness.py` | per-role briefs, `mcp.json`/`settings.json`/`opencode.json`, per-round argv, headless rounds |
+| `clan/harness.py` | per-role briefs, `mcp.json`/`settings.json`/`opencode.json`, launch facade and policy helpers |
+| `clan/adapters.py` | harness argument construction |
+| `clan/supervision.py` | headless subprocess lifecycle, timeout and failure handling |
+| `clan/output.py` | bounded output tails |
 | `clan/loop.py` | `NudgeLoop`: one nudge line on stdin → one round |
 | `clan/watch.py` | tails the bus, types a mention line into the mentioned role's pane; probes each pane for a permission dialog and posts `@stakeholder` once |
 | `clan/prompts.py` | recognises a harness permission dialog at the bottom of a screen dump |
@@ -258,9 +262,9 @@ Channel-directory additions for a clan channel:
 <channel>/
   clan/clan.toml         the approved clan (roles, models, writer bit) — one level
                          down so the channel root stays out of every role's grant
-  clan.state.json        tool-owned state (session, tabs, pane ids, unattended,
-                         checkout, writer bits + briefs) — agent-reachable, so read AND
-                         write paths filter env keys, and no role may write it
+  channel.sqlite3       messages, cursors, approval intents and versioned clan state
+                         (session, tabs, checkout, writers, briefs and watcher state)
+  clan.state.json        retained legacy state after explicit offline import
   harness/<role>/
     brief.md             the role's brief (channel dir, clan table, unattended line)
     mcp.json             the ratel MCP server for the role
@@ -290,28 +294,43 @@ the role's default prompt, then each nudge line becomes one spawned child
 stdout pumped to the pane while buffered for the record, `wait(timeout=…)` as
 the timeout authority, `killpg` on expiry).
 `--continue`/`-s <session>` resumes only from round 2. Each round's stdout is
-pumped to the pane and appended to `rounds.jsonl`; `CLAN_ROUND_TIMEOUT` (default
+pumped to the pane; bounded stdout/stderr tails are appended to `rounds.jsonl`; `CLAN_ROUND_TIMEOUT` (default
 3600 s) kills a wedged round, and `clan down` killpgs the group a `round.pid`
 ledger names — verified by process start time, so a stale or forged ledger
 cannot kill a bystander. The `--add-dir` set is the file boundary per role
 (`plans/`, `files/`, own harness dir; the orchestrator also `clan/`), and the
-channel root — which holds `clan.state.json` — is excluded from every role's
+channel root — which holds `channel.sqlite3` — is excluded from every role's
 add-dir by design.
 
-`rounds.jsonl` can contain secrets and is never attached to the channel or a PR.
+Output capture retains at most 40 chunks and 65,536 characters per stream. Reads are bounded
+at 4096 characters even without newlines. Session IDs are captured incrementally, independently
+of the retained tail. `CLAN_ROUND_LOG=full` streams full stdout/stderr to exclusive per-round
+files and stores their filenames in the record. `rounds.jsonl` can contain secrets and is never attached to the channel or a PR.
+The same applies to full output logs. Log retention remains an operator responsibility.
 
 Storage safety uses shared structural validation in `schema.py` and channel path containment
 in `paths.py`. Readers skip malformed nested records; `ratel diagnostics` reports counts.
 Channel paths reject symlinks, including database sidecars; the selected home remains trusted.
 These checks are not a sandbox against another process with the same filesystem permissions.
 
-Schema 2 adds `approval_applications`. A board decision checks the latest proposal under the
-same SQLite write transaction as its insertion. Applying it freezes the resolved configuration
-and state snapshot in a committed intent, atomically replaces clan.toml, updates clan.state.json
-under flock with fsync, then marks the intent complete. Lifecycle readers refuse pending intents;
-`clan approve` recovers them before processing another decision. Runtime state remains JSON until work item 4;
-clan.toml remains operator-editable. This protocol provides retry recovery across the two files.
-Version 1 channels remain readable and upgrade transactionally when opened for writing.
+Schema 2 adds `approval_applications`; schema 3 adds `clan_state`. A board decision checks the
+latest proposal under the same write transaction as insertion. Applying it freezes the resolved
+configuration and state snapshot in a committed intent, atomically replaces clan.toml, then
+commits runtime state and intent completion in one SQLite transaction. Lifecycle readers refuse
+pending intents; `clan approve` retries the saved application after interruption. The editable
+TOML file still requires this recovery protocol across the file/database boundary.
+
+Clan-state payload version 1 preserves unknown fields and validates known container shapes.
+WAL readers see committed state while another process writes; a monotonic state revision drives
+board refreshes. Existing JSON state is read-only until explicit offline `migrate-state` import,
+which retains the original. Schema 1/2 databases stay readable and upgrade on writes. Runtime
+state still filters environment keys on read/write paths; same-user filesystem trust is unchanged.
+
+The board page is assembled from `board.html` and ordered `board-state.js`, `board-render.js`,
+and `board-network.js` sources. State/routing, rendering and network orchestration can be edited
+separately while retaining one same-origin page, the existing CSP and no build step.
+`doctor.py` provides read-only structured configuration, storage, binary, credential-presence
+and worktree checks, suppressing credential values and raw exception text.
 
 ### Board navigation and request lifetime
 

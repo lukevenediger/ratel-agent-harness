@@ -82,6 +82,18 @@ restart every writer with this version of ratel. The board can browse an unmigra
 channel, but writes require migration. See [the storage contract](docs/cli-contract.md#storage-and-migration)
 for backup, rollback and local-disk requirements.
 
+## Runtime checks and existing clans
+
+Run `ratel doctor --channel harbor` to inspect local configuration, binaries, credential
+presence, worktrees and storage without modifying them. The JSON report never includes
+credential values.
+
+Clan runtime state now lives in SQLite. For an existing clan, stop its processes, migrate
+legacy messages first if needed, then run `ratel migrate-state --channel harbor`. The old
+`clan.state.json` is retained unchanged; restart with the updated ratel afterward. New clans
+need no state import. Full headless output can be streamed to per-round files with
+`CLAN_ROUND_LOG=full`; round records keep bounded stdout/stderr tails.
+
 ## Tests
 
 ```bash

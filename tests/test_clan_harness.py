@@ -405,8 +405,8 @@ class FakePopen:
         self.pid = 42424 + len(self.__class__.procs)      # killpg fallback path needs it
         self.returncode: int | None = FakePopen.next_rc
         self.killed = False
-        self.stdout = list(FakePopen.lines_for)
-        self.stderr: list[str] = []
+        self.stdout = io.StringIO("".join(FakePopen.lines_for))
+        self.stderr = io.StringIO()
         if argv[0] != "ps":                  # _ps_lstart's ps calls are not rounds
             type(self).procs.append(self)
 
@@ -427,7 +427,7 @@ class HangingPopen(FakePopen):
     def __init__(self, argv, **kw):
         super().__init__(argv, **kw)
         self.returncode = None
-        self.stdout = []
+        self.stdout = io.StringIO()
 
     def poll(self):
         return None if not self.killed else -9
@@ -797,7 +797,10 @@ def test_round_output_caps_to_the_last_40_lines_unless_clan_round_log_full(clan,
     (paths.harness_dir("developer") / "rounds.jsonl").unlink()
     H.launch(paths, cfg, "developer", worktree="/tmp/wt", unattended=True, stdin=io.StringIO())
     rec = json.loads((paths.harness_dir("developer") / "rounds.jsonl").read_text())
-    assert rec["output"] == "".join(f"line{i}\n" for i in range(50))
+    assert rec["output"] == "".join(f"line{i}\n" for i in range(10, 50))
+    full = paths.harness_dir("developer") / rec["logs"]["stdout"]
+    assert full.read_text() == "".join(f"line{i}\n" for i in range(50))
+    assert rec["truncated"]["stdout"] is True
 
 
 def test_round_argv_logs_the_brief_by_path_not_text(clan, monkeypatch):
@@ -1034,3 +1037,48 @@ def test_write_configs_refuses_symlink_file(home, tmp_path):
     with pytest.raises(ValueError, match='symlink'):
         H.write_configs(paths, cfg, 'developer')
     assert outside.read_text() == 'untouched'
+
+
+def test_supervisor_keeps_early_session_id_after_large_output(clan, monkeypatch):
+    cfg, paths = clan
+    cfg.roles['developer'].harness = 'opencode-run'
+    H.write_configs(paths, cfg, 'developer', worktree='/tmp/wt')
+    cls = install_popen(monkeypatch, FakePopen)
+    cls.lines_for = ['{"sessionID":"ses_early"}\n'] + ['x' * 4096] * 30
+    H.launch(paths, cfg, 'developer', worktree='/tmp/wt', unattended=True, stdin=io.StringIO('next\n'))
+    assert 'ses_early' in cls.procs[1].argv
+    records = [json.loads(line) for line in (paths.harness_dir('developer') / 'rounds.jsonl').read_text().splitlines()]
+    assert all(len(r['output']) <= 65536 and r['truncated']['stdout'] for r in records)
+
+
+def test_supervisor_keeps_stderr_failure_excerpt(clan, monkeypatch):
+    cfg, paths = clan
+    cfg.roles['developer'].harness = 'opencode-run'
+    H.write_configs(paths, cfg, 'developer', worktree='/tmp/wt')
+    class Failure(FakePopen):
+        def __init__(self, *args, **kwargs):
+            super().__init__(*args, **kwargs)
+            self.returncode = 1
+            self.stderr = io.StringIO('failure detail\n')
+    install_popen(monkeypatch, Failure)
+    H.launch(paths, cfg, 'developer', worktree='/tmp/wt', unattended=True, stdin=io.StringIO())
+    record = json.loads((paths.harness_dir('developer') / 'rounds.jsonl').read_text())
+    assert record['returncode'] == 1 and record['stderr'] == 'failure detail\n'
+
+
+def test_supervisor_reports_capture_failure(clan, monkeypatch):
+    cfg, paths = clan
+    cfg.roles['developer'].harness = 'opencode-run'
+    H.write_configs(paths, cfg, 'developer', worktree='/tmp/wt')
+    class BrokenStream:
+        def readline(self, size):
+            raise OSError('capture failed')
+    class Failure(FakePopen):
+        def __init__(self, *args, **kwargs):
+            super().__init__(*args, **kwargs)
+            self.stdout = BrokenStream()
+    install_popen(monkeypatch, Failure)
+    H.launch(paths, cfg, 'developer', worktree='/tmp/wt', unattended=True, stdin=io.StringIO())
+    record = json.loads((paths.harness_dir('developer') / 'rounds.jsonl').read_text())
+    assert record['returncode'] == 'error'
+    assert 'output capture failed' in record['output']
