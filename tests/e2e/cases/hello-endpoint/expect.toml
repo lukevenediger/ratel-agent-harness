@@ -1,0 +1,6 @@
+pr_branch = "issue-{n}"
+checks = "success"
+pins = ["clan", "execution", "mermaid"]
+verdict_roles = ["reviewer", "security-reviewer", "simplifier"]
+no_assignee = true
+timeout_s = 2700

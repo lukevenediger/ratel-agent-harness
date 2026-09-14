@@ -1,0 +1,55 @@
+# Packaged models catalog. $RATEL_HOME/models.toml deep-merges over these.
+# `harness` lists the harnesses that can run the model; `env` the API keys it
+# needs in the environment (never written to disk); `efforts` the effort words
+# the provider itself accepts — a preset carries one of them verbatim, and an
+# effort the model does not declare emits no effort flag at all.
+
+[models."deepseek/deepseek-flash"]
+name = "DeepSeek Flash"
+harness = ["opencode", "opencode-run"]
+provider = "deepseek"
+env = ["DEEPSEEK_API_KEY"]
+efforts = ["high", "max"]           # DeepSeek's API maps low/medium onto high server-side
+[models."deepseek/deepseek-flash".opencode]
+npm = "@ai-sdk/openai-compatible"
+baseURL = "https://api.deepseek.com"
+limit = { context = 1000000, output = 98304 }
+options = { max_tokens = 98304 }
+reasoning = true
+tool_call = true
+interleaved = { field = "reasoning_content" }
+
+[models."openrouter/deepseek/deepseek-v4.1-flash"]
+name = "DeepSeek V4.1 Flash (OpenRouter)"
+harness = ["opencode", "opencode-run"]
+provider = "openrouter"
+env = ["OPENROUTER_API_KEY"]
+efforts = ["minimal", "low", "medium", "high", "xhigh", "max"]
+[models."openrouter/deepseek/deepseek-v4.1-flash".opencode]
+limit = { context = 1000000, output = 98304 }
+options = { max_tokens = 98304 }
+
+[models."openrouter/z-ai/glm-5.3-flash"]
+name = "GLM 5.3 Flash (OpenRouter)"
+harness = ["opencode", "opencode-run"]
+provider = "openrouter"
+env = ["OPENROUTER_API_KEY"]
+efforts = ["minimal", "low", "medium", "high", "xhigh", "max"]
+[models."openrouter/z-ai/glm-5.3-flash".opencode]
+limit = { context = 1048576, output = 98304 }
+options = { max_tokens = 98304 }
+
+[models."claude-fable-5-1"]
+name = "Claude Fable 5.1"
+harness = ["claude", "claude-p"]
+efforts = ["low", "medium", "high"]
+
+[models."claude-opus-5"]
+name = "Claude Opus 5"
+harness = ["claude", "claude-p"]
+efforts = ["low", "medium", "high"]
+
+[models."claude-sonnet-5"]
+name = "Claude Sonnet 5"
+harness = ["claude", "claude-p"]
+efforts = ["low", "medium", "high"]

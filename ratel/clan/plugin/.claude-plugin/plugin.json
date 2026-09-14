@@ -1,0 +1,6 @@
+{
+  "name": "clan",
+  "description": "Execute a GitHub issue with an orchestrator and role agents coordinating over an ratel channel.",
+  "version": "0.1.0",
+  "skills": "./skills/"
+}

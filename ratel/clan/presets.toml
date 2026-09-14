@@ -1,0 +1,70 @@
+# Packaged preset catalog. $RATEL_HOME/presets.toml deep-merges over these.
+# A preset is the ONE thing a proposal picks per role: it names the harness, the
+# model and the provider's own effort word, which is sent through untouched.
+# The key is a stable slug — `order` is display order only, so inserting a
+# preset never re-points an existing one.
+
+[presets.deepseek-flash-high]
+order = 1
+harness = "opencode"
+model = "deepseek/deepseek-flash"
+effort = "high"
+label = "opencode · DeepSeek Flash · DeepSeek · high"
+
+[presets.deepseek-flash-max]
+order = 2
+harness = "opencode"
+model = "deepseek/deepseek-flash"
+effort = "max"
+label = "opencode · DeepSeek Flash · DeepSeek · max"
+
+[presets.or-deepseek-flash-high]
+order = 3
+harness = "opencode"
+model = "openrouter/deepseek/deepseek-v4.1-flash"
+effort = "high"
+label = "opencode · DeepSeek V4.1 Flash · OpenRouter · high"
+
+[presets.or-deepseek-flash-max]
+order = 4
+harness = "opencode"
+model = "openrouter/deepseek/deepseek-v4.1-flash"
+effort = "max"
+label = "opencode · DeepSeek V4.1 Flash · OpenRouter · max"
+
+# GLM stays at low deliberately: its reasoning is mandatory and medium starves
+# the code out of its output cap (DECISIONS #31, docs/harness-setup.md).
+[presets.or-glm-flash-low]
+order = 5
+harness = "opencode"
+model = "openrouter/z-ai/glm-5.3-flash"
+effort = "low"
+label = "opencode · GLM 5.3 Flash · OpenRouter · low"
+
+[presets.fable-high]
+order = 6
+harness = "claude"
+model = "claude-fable-5-1"
+effort = "high"
+label = "claude · Claude Fable 5.1 · Claude · high"
+
+[presets.opus-medium]
+order = 7
+harness = "claude"
+model = "claude-opus-5"
+effort = "medium"
+label = "claude · Claude Opus 5 · Claude · medium"
+
+[presets.opus-high]
+order = 8
+harness = "claude"
+model = "claude-opus-5"
+effort = "high"
+label = "claude · Claude Opus 5 · Claude · high"
+
+[presets.sonnet-high]
+order = 9
+harness = "claude"
+model = "claude-sonnet-5"
+effort = "high"
+label = "claude · Claude Sonnet 5 · Claude · high"

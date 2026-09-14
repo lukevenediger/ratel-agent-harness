@@ -1,0 +1,14 @@
+{
+  "$schema": "https://opencode.ai/config.json",
+  "mcp": {
+    "ratel": {
+      "type": "local",
+      "command": ["ratel-mcp"],
+      "environment": {
+        "AGENT_NAME": "worker-b",
+        "CHANNEL": "harbor"
+      },
+      "enabled": true
+    }
+  }
+}

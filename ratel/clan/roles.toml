@@ -1,0 +1,39 @@
+# Packaged role catalog. $RATEL_HOME/roles.toml overrides these; clan.toml overrides both.
+# Builder and reviewer are never the same model (how-we-work #132).
+# A role picks ONE preset (presets.toml); the preset supplies harness, model and
+# effort, and beats any sibling harness/model/effort key an override sets.
+
+[defaults]
+checkpoint_at = 200000
+
+[roles.orchestrator]
+preset = "fable-high"
+writer = false
+brief = "orchestrator"
+
+[roles.developer]
+# deepseek-flash-high, not -max: the old catalog mapped this role's inherited
+# "medium" level onto DeepSeek's "high", and the preset keeps that word.
+preset = "deepseek-flash-high"
+writer = true
+brief = "developer"
+
+[roles.reviewer]
+preset = "opus-high"
+writer = false
+brief = "reviewer"
+
+[roles.security-reviewer]
+preset = "opus-high"
+writer = false
+brief = "security-reviewer"
+
+[roles.simplifier]
+preset = "opus-medium"
+writer = false
+brief = "simplifier"
+
+[roles.docs]
+preset = "or-deepseek-flash-high"
+writer = false
+brief = "docs"

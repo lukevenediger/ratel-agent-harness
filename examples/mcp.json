@@ -1,0 +1,12 @@
+{
+  "mcpServers": {
+    "ratel": {
+      "type": "stdio",
+      "command": "ratel-mcp",
+      "env": {
+        "AGENT_NAME": "worker-a",
+        "CHANNEL": "harbor"
+      }
+    }
+  }
+}

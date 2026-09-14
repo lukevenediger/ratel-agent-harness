@@ -1,0 +1,20 @@
+// ~/.config/zellij/layouts/harbor.kdl — one session per project.
+//   zellij --layout harbor
+//
+// Worktrees are siblings of the repo, never inside it, so file watchers in the
+// main checkout don't pick them up:
+//   git -C ~/code/harbor worktree add ../harbor-wt/a
+//
+// The board is NOT in here — it runs once, outside any Zellij session, and
+// serves every channel.
+layout {
+    tab name="orchestrator" cwd="~/code/harbor" {
+        pane command="claude"
+    }
+    tab name="worker-a" cwd="~/code/harbor-wt/a" { pane }
+    tab name="worker-b" cwd="~/code/harbor-wt/b" { pane }
+    tab name="security" cwd="~/code/harbor-wt/sec" { pane }
+    tab name="bus" cwd="~/.ratel/channels/harbor" {
+        pane command="tail" { args "-f" "bus.jsonl" }
+    }
+}
