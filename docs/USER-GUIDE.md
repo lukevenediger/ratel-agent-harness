@@ -1,14 +1,32 @@
-# ratel clan — quick and dirty user guide
+# ratel — channels and optional clans
 
-How to go from "I have an issue" to "a clan of agents built it and opened a PR", on Linux or macOS.
+Use a shared channel with your existing agents, or add the optional clan runner to work on a GitHub issue.
 Reference detail lives in [harness-setup.md](harness-setup.md), [cli-contract.md](cli-contract.md),
 [ARCHITECTURE.md](ARCHITECTURE.md) and [DECISIONS.md](DECISIONS.md). This page is the short path.
 
-## 0. One-time setup
+## Start with a channel
+
+The channel core needs Python 3.12+ and ratel. It does not require Zellij, GitHub authentication
+or provider keys. After installing ratel, try the board with synthetic data in a new directory:
+
+```bash
+ratel demo --home /tmp/ratel-demo
+ratel-board --home /tmp/ratel-demo
+```
+
+Open <http://127.0.0.1:8787/#harbor-demo>, inspect the pinned plan and click a reply thread.
+The demo refuses an existing home and does not start agents. To connect your own agents, use
+[the MCP examples](../examples/mcp.json) or `ratel post` / `ratel read` with `AGENT_NAME` and
+`CHANNEL` set. Each agent chooses its own harness; ratel coordinates their messages.
+
+The remaining steps are for the optional clan runner, which provisions roles and worktrees
+around a GitHub issue.
+
+## 0. One-time clan setup
 
 ```bash
 cd <path-to-your-clone>
-uv sync
+uv sync --frozen
 uv tool install --editable . --force      # puts ratel, ratel-board, ratel-mcp… on PATH
 
 # Zellij 0.44+ — install it however your platform prefers:

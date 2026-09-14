@@ -1,5 +1,6 @@
 """Real-browser acceptance tests; install Playwright for Node and Chromium to run."""
 import json
+import os
 import shutil
 import subprocess
 import sys
@@ -13,12 +14,19 @@ from ratel.bus import Bus
 from ratel.ulid import ulid
 
 
+def _missing_runtime(reason):
+    if os.environ.get('RATEL_REQUIRE_BROWSER') == '1':
+        pytest.fail(reason)
+    pytest.skip(reason)
+
+
 def test_board_browser_navigation_and_races(home):
     if not shutil.which('node'):
-        pytest.skip('Node is required for browser tests')
-    available = subprocess.run(['node', '-e', "require('playwright')"], capture_output=True)
+        _missing_runtime('Node is required for browser tests')
+    available = subprocess.run(['node', '-e', "require('playwright')"], capture_output=True,
+                               cwd=Path(__file__).parent / 'browser')
     if available.returncode:
-        pytest.skip('Install Node playwright and Chromium; expose it via NODE_PATH')
+        _missing_runtime('Install Node playwright and Chromium; expose it via NODE_PATH')
     bus = Bus(home, 'alpha')
     parent = bus.post('orchestrator', 'Needle @stakeholder', pin=True)
     bus.post('reviewer', 'An old reply', parent=parent['id'])
@@ -48,3 +56,10 @@ def test_board_browser_navigation_and_races(home):
         server.shutdown()
         server.server_close()
         thread.join(timeout=5)
+
+
+
+def test_required_browser_runtime_cannot_silently_skip(monkeypatch):
+    monkeypatch.setenv('RATEL_REQUIRE_BROWSER', '1')
+    with pytest.raises(pytest.fail.Exception, match='runtime missing'):
+        _missing_runtime('runtime missing')

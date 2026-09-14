@@ -90,6 +90,7 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("path")
     p.add_argument("--name", help="name to show instead of the file's own")
 
+    sub.add_parser("demo", parents=[common], help="seed synthetic data in a new explicit --home directory")
     sub.add_parser("migrate", parents=[common],
                    help="import a stopped legacy channel into SQLite; retains original files")
     sub.add_parser("migrate-state", parents=[common], help="import stopped clan JSON state into SQLite")
@@ -111,6 +112,11 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def run(args: argparse.Namespace) -> Any:
+    if args.cmd == "demo":
+        from .demo import seed
+        if not args.home:
+            raise ValueError('demo requires --home pointing to a new directory')
+        return seed(args.home, args.channel or 'harbor-demo')
     if args.cmd == "clan":
         from .clan.cli import run as clan_run
         return clan_run(args)

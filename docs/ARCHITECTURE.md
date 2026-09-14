@@ -373,3 +373,19 @@ outside channel storage. Referenced files and all messages/configuration/plans/w
 retention only removes old orphan attachments or unreferenced generated full logs. External
 writers must be stopped; the filesystem is not transactionally locked. Restoring means copying
 a verified archive to a new offline channel, never overwriting an active one.
+
+
+### Packaged artifacts and verification
+
+`demo.py` seeds a new explicitly selected home with synthetic messages and attachments through
+Bus. It starts no clan or provider process. The same command runs from a wheel and from a
+checkout. `scripts/verify-wheel.py` builds a wheel, exports frozen production dependencies with
+hashes, installs into a temporary virtualenv outside the checkout, and verifies console entry
+points, catalogs/briefs/dispatch skill, assembled board JavaScript, Mermaid and attachment HTTP
+routes, and MCP stdio. The disposable demo home is removed with the smoke environment.
+
+CI includes Linux and macOS test jobs with explicit Node/Chromium setup from the browser npm
+lockfile. Required browser mode turns missing dependencies into failures. The macOS job also
+runs isolated Zellij integration tests. Ruff, frozen dependency verification and installed-wheel
+checks feed the stable `CI required` aggregate job. Paid/live harness tests remain excluded by
+default. Repository branch protection must select that status check separately.

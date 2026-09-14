@@ -21,7 +21,7 @@ Attachments and human-edited configuration remain ordinary files.
 ## Quick start
 
 ```bash
-uv sync
+uv sync --frozen
 uv tool install --editable .          # puts ratel, ratel-mcp, ratel-board, ratel-unread on PATH
 
 AGENT_NAME=worker-a CHANNEL=harbor ratel post "@orchestrator auth middleware done"
@@ -37,6 +37,19 @@ uv tool install git+https://github.com/lukevenediger/ratel
 ```
 
 Wire an agent's harness to the MCP server with `examples/mcp.json` (Claude Code) or `examples/opencode.json` (OpenCode). Start with [docs/USER-GUIDE.md](docs/USER-GUIDE.md); details in [docs/harness-setup.md](docs/harness-setup.md).
+
+## Try the board without agents
+
+Choose a **new** directory for the demo; existing homes are refused:
+
+```bash
+ratel demo --home /tmp/ratel-demo
+ratel-board --home /tmp/ratel-demo
+```
+
+Open <http://127.0.0.1:8787/#harbor-demo>. The synthetic channel includes a pinned plan,
+threaded review, code and Markdown attachments. It needs no credentials, Zellij or running
+agents. Use another directory when repeating the demo; there is no destructive reset option.
 
 ## Docs
 
@@ -126,17 +139,27 @@ uv run pytest -q
 
 Every test uses a temporary home; nothing touches the real `~/.ratel`.
 
-The browser acceptance test uses Node Playwright and Chromium. With an existing Playwright
-installation, expose its `node_modules` using `NODE_PATH` and run:
+Browser tests use the locked Node dependencies in `tests/browser`. Install Node 22+, then:
 
 ```bash
-NODE_PATH=/path/to/node_modules uv run --frozen pytest -q tests/test_board_browser.py
+npm ci --ignore-scripts --prefix tests/browser
+npx --prefix tests/browser --no-install playwright install chromium
+RATEL_REQUIRE_BROWSER=1 uv run --frozen pytest -q
+uv run --frozen ruff check .
+uv run --frozen python scripts/verify-wheel.py
 ```
 
-To install an isolated test runtime: `npm install --prefix /tmp/ratel-browser-tests playwright`,
-then `/tmp/ratel-browser-tests/node_modules/.bin/playwright install chromium` and use
-`NODE_PATH=/tmp/ratel-browser-tests/node_modules`. Without Playwright the browser test reports
-an explicit skip; the existing Node and HTTP tests still run.
+`RATEL_REQUIRE_BROWSER=1` makes missing browser prerequisites an error. Without it, local
+browser tests may skip if Node or Playwright is missing. An existing Playwright installation
+can still be supplied via `NODE_PATH`. Live provider tests remain opt-in; these commands do
+not spend model tokens.
+
+CI runs Linux Python 3.12/3.13 and macOS Python 3.14, with browser dependencies installed
+explicitly. macOS also installs Zellij for the isolated scripted-agent tests. Separate jobs
+check Ruff and a clean wheel install, including packaged board assets, catalogs, briefs,
+demo data, HTTP and MCP stdio. The stable aggregate check is named **CI required**; select it
+in repository branch protection to enforce these gates. The workflow does not alter branch
+protection settings.
 
 ## Licence
 

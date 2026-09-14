@@ -282,3 +282,14 @@ append order, pins, cursors and runtime state are preserved. Worktree paths and 
 transcripts still refer to their original locations; a data restore does not recreate or launch
 those processes. Keep the backup until the restored data has been checked. Do not overwrite an
 existing active channel to restore it.
+
+
+## Synthetic demo
+
+`demo --home PATH [--channel NAME]` creates six sample messages, a pinned task plan, threaded
+review and local attachments. `PATH` must be a new directory; even an empty existing directory
+is refused. `--home` is mandatory: neither `RATEL_HOME` nor the default live home is selected
+implicitly. The channel defaults to `harbor-demo`. The JSON report contains `home`, `channel`,
+`messages` and the root `thread` ID. No credentials, providers or clan processes are used.
+Run `ratel-board --home PATH` to browse the result. Repeating the command requires a new path;
+there is no overwrite or reset flag.

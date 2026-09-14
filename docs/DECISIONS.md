@@ -464,7 +464,7 @@ is migrated by development or tests.
    R17: dry-run archive/retention tooling that excludes active clans, retains referenced files,
    and uses SQLite-aware backup. Acceptance: deterministic budget tests, active-clan safeguards,
    restore checks and orphan/reference fixtures. Never silently delete operator work.
-6. **Continuous verification and onboarding — pending.** R18: concurrency and real browser
+6. **Continuous verification and onboarding — implemented and verified locally.** R18: concurrency and real browser
    behaviour tests alongside existing unit/golden tests. R19: lint, frozen installs, packaged-wheel
    smoke test, macOS CI and explicit Node availability; keep paid/live harness tests opt-in.
    R20: restore the missing demo seed workflow and describe the channel core plus optional clan
@@ -649,3 +649,37 @@ stop metadata, default dry runs, WAL-backed restore of messages/pins/cursors/sta
 active/uncertain clan refusal, changed-file aborts, destination collisions, special-file and
 symlink refusal, and direct/encoded/plan/round/malformed-message references. Work item 6
 (continuous verification and onboarding) remains pending.
+
+
+**48. Required verification jobs and a disposable demo (2026-09-14).** Work item 6 of
+Decision 42 stays on the operator-authorized `issue-1` stack. CI now runs Ruff, checks lock
+consistency, uses frozen Python installs, and runs the suite on Linux Python 3.12/3.13 and
+macOS Python 3.14. Node 22 and locked Playwright/Chromium are explicit prerequisites; required
+browser mode fails instead of silently skipping a missing runtime. macOS installs Zellij and
+runs the isolated scripted-agent tests. Existing independent-process storage races and real
+browser timing tests are part of these jobs. Paid/live harness tests remain opt-in.
+
+A separate installed-wheel job builds the artifact, installs hash-locked production dependencies
+and the wheel in a new virtualenv outside the checkout, and checks console entry points,
+catalogs, briefs, the dispatch skill, assembled board assets, Mermaid, demo attachment routes
+and an MCP stdio post. Third-party notices now accompany the wheel. The stable `CI required`
+aggregate requires lint, every test matrix job and the wheel job to succeed. Action references
+are pinned to verified official repository SHAs. This changes the workflow, not GitHub branch
+protection; selecting the aggregate as a required check remains a repository setting.
+
+`ratel demo --home PATH` restores the synthetic demo workflow without credentials or agent
+processes. A new explicit home is mandatory, existing directories are refused, and no reset
+or overwrite option exists. The channel demonstrates pins, threaded review, code, Markdown and
+a diagram preview. File previews use served `files/` copies; the task plan also remains in
+`plans/`. README and the user guide start with the channel core and distinguish optional clan
+requirements. The CLI contract documents the demo and local verification commands use the
+same frozen/locked dependencies as CI.
+
+Verification: `RATEL_REQUIRE_BROWSER=1 RATEL_HOME=<scratch> uv run --frozen pytest -q
+--tb=short` passed **799 tests**, with **6 opt-in tests deselected**, using the clean npm install
+rather than an ambient NODE_PATH. The final demo preview and notice-packaging changes also
+passed **12 demo/documentation tests** and the installed-wheel smoke check (entry points,
+assets, demo, HTTP and MCP). `npm ci --ignore-scripts`, `uv lock --check`, Ruff,
+`git diff --check` and actionlint v1.7.7 passed. All six implementation phases are complete
+locally. The new Linux/macOS GitHub matrix still awaits a push, and branch-protection settings
+were not modified. No live home was read, no model tokens were spent, and no branch was pushed.
