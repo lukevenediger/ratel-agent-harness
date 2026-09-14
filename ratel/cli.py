@@ -93,6 +93,11 @@ def build_parser() -> argparse.ArgumentParser:
     sub.add_parser("migrate", parents=[common],
                    help="import a stopped legacy channel into SQLite; retains original files")
     sub.add_parser("migrate-state", parents=[common], help="import stopped clan JSON state into SQLite")
+    for command in ('archive', 'retain'):
+        p = sub.add_parser(command, parents=[common], help='offline maintenance; dry run unless --apply')
+        p.add_argument('--destination', help='new archive directory outside channel storage')
+        p.add_argument('--apply', action='store_true', help='create verified backup and apply the operation')
+        p.add_argument('--older-than-days', type=float, default=30, help='orphan minimum age; default 30')
     sub.add_parser("doctor", parents=[common], help="read-only configuration and runtime checks")
     sub.add_parser("diagnostics", parents=[common],
                    help="count malformed messages and cursors without modifying storage")
@@ -109,6 +114,13 @@ def run(args: argparse.Namespace) -> Any:
     if args.cmd == "clan":
         from .clan.cli import run as clan_run
         return clan_run(args)
+    if args.cmd in ('archive', 'retain'):
+        from .retention import maintain
+        channel = args.channel or os.environ.get('CHANNEL')
+        if not channel:
+            raise ValueError('set CHANNEL or pass --channel')
+        return maintain(args.home or default_home(), channel, days=args.older_than_days,
+                        destination=args.destination, apply=args.apply, retain=args.cmd == 'retain')
     if args.cmd == "doctor":
         from .doctor import diagnose
         return diagnose(args.home or default_home(), args.channel or os.environ.get("CHANNEL"))

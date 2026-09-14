@@ -1436,7 +1436,7 @@ document.addEventListener("keydown", e => {
 // These three take strings/arrays and return plain objects so they can be
 // sliced out and golden-tested under node. All DOM construction lives in the
 // paint layer below. The state vocabulary is asserted equal to the Python one.
-const MAP_STATES = ["gone", "awaiting-operator", "stuck", "context-full", "busy", "queued",
+const MAP_STATES = ["gone", "stopped", "awaiting-operator", "stuck", "context-full", "busy", "queued",
                     "online", "idle", "offline"];
 
 // Fixed radial layout: orchestrator at the hub, the rest on a circle in the
@@ -1533,7 +1533,7 @@ function svgEl(tag, attrs, text) {
 // awaiting-operator violet (the one state that is the operator's to clear),
 // online green, everything unknown/quiet neutral. A weak reading draws dashed.
 const MAP_RING = {
-  gone: "var(--text-muted)", stuck: "var(--status-closed)", "context-full": "var(--a7)",
+  stopped: "var(--status-closed)", gone: "var(--text-muted)", stuck: "var(--status-closed)", "context-full": "var(--a7)",
   "awaiting-operator": "var(--a5)",
   busy: "var(--accent)", queued: "var(--text-muted)", online: "var(--status-open)",
   idle: "var(--outline)", offline: "var(--text-muted)",

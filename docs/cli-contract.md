@@ -210,3 +210,75 @@ Headless round records retain bounded stdout and stderr tails: at most 40 chunks
 `truncated` flags and `logs` filenames. `CLAN_ROUND_LOG=full` streams complete output into
 exclusive per-round stdout/stderr files in the role's harness directory; it does not enlarge
 in-memory buffers. `CLAN_ROUND_TIMEOUT` must be a finite positive number of seconds.
+
+
+## Headless run limits
+
+`claude-p` and `opencode-run` have per-role, per-launch limits. Set these environment variables
+before creating the clan's Zellij session (or before a direct launch):
+
+| Variable | Default | Meaning |
+|---|---|---|
+| `CLAN_MAX_ROUNDS` | 100 | Maximum attempted rounds, including failed launches. |
+| `CLAN_MAX_SECONDS` | 28800 | Elapsed seconds since launch, including idle time between nudges. |
+| `CLAN_MAX_FAILURES` | 3 | Consecutive nonzero exits, timeouts, authentication/prompt errors or capture failures. A successful round resets this count. |
+| `CLAN_ROUND_BUDGET_USD` | unset | Optional provider-enforced spend limit per Claude print-mode round. |
+
+All configured limits must be positive and finite; rounds/failures must be integers. They
+apply to both attended and unattended headless launches. Interactive and scripted fake harnesses
+have no supervisor budget. A checkpoint resets conversation state but not these counters.
+An operator's new launch starts a new budget; automatic retries and watcher nudges cannot
+restart a stopped role. This is not an account-wide or shared clan spend cap.
+
+A running child is killed at the earlier of its round timeout and remaining launch time,
+with bounded pipe-cleanup waits afterward. Idle input also expires at the launch deadline.
+`clan status` and the board expose state `stopped`, a `stop_reason` code (`max_rounds`,
+`max_seconds`, `max_failures`) and a human-readable reason. SQLite `runs[role]` retains the
+configured limits and counters. The watcher excludes stopped roles from nudges, stale-work
+escalations and automatic compaction. Records remain available for inspection.
+
+Claude's documented [`--max-budget-usd`](https://code.claude.com/docs/en/cli-usage) print-mode
+flag implements the per-round spend limit. Every round gets the same configured allowance;
+provider accounting/enforcement determines actual spend. `opencode-run` rejects this option
+before launching a child. No portable token budget or cost estimate is inferred from context
+size; token accounting differs by harness/provider. Ratel's round/time/failure limits work
+without provider usage reporting.
+
+## Offline archive and retention
+
+`archive --channel NAME` reports the number of files to archive. `retain --channel NAME
+[--older-than-days N]` lists eligible orphans (default 30 days). Both default to a read-only
+dry run and require an existing SQLite channel. `--apply --destination PATH` creates a
+new complete backup directory; its parent must exist and it must be outside all channel
+storage. An existing destination is always refused. Both return:
+`{"channel", "dry_run", "candidates", "files_to_archive", "removed", "archive"}`.
+
+Stop **all** channel writers before applying maintenance. For a clan, run `clan down` first:
+recorded tabs, missing explicit shutdown state or any remaining round PID ledger block the
+operation, even if they might be stale. Pending approval applications must be recovered first.
+`clan down` keeps worktrees by default; maintenance never prunes or changes them. Symlinks,
+special files and `.env` files in channel storage are refused.
+
+The backup uses SQLite's backup API, then verifies integrity and SHA-256 hashes of copied
+files. It includes the database, attachments, plans, configuration, runtime records and retained
+legacy inputs. SQLite-managed WAL/SHM/journal files are excluded because the backup contains
+their committed state. `archive-manifest.json` lists content hashes and the source channel.
+Backup creation uses a SQLite write lock to hold off cooperating writers; file inventory and
+content checks detect ordinary changes during copying. This does not lock external editors or
+old binaries, which is why offline operation is required. Failed backup verification removes
+only the new incomplete destination and never authorizes source cleanup.
+
+`archive` never removes source files. `retain` considers only direct files in `files/` and
+ULID-named `harness/<role>/*-stdout.log` / `*-stderr.log`. A reference from any message (including
+malformed records skipped by readers), clan state, clan configuration, plan text or round log
+protects a candidate. Filename mentions are deliberately conservative. Referenced full logs
+and all history remain; this command does not bound retained message/log history automatically.
+Only old, unreferenced candidates are removed, after a complete verified backup. If cleanup
+is interrupted, the backup remains and a fresh dry run reflects what is left.
+
+To restore, stop writers and copy the backup into a **new** `channels/<name>` directory under
+an offline home. Verify the manifest's SHA-256 hashes before opening it with ratel. Message IDs,
+append order, pins, cursors and runtime state are preserved. Worktree paths and external provider
+transcripts still refer to their original locations; a data restore does not recreate or launch
+those processes. Keep the backup until the restored data has been checked. Do not overwrite an
+existing active channel to restore it.

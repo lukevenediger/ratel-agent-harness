@@ -16,7 +16,8 @@ from typing import TextIO
 
 from ..paths import confined
 from ..ulid import ulid
-from .config import ClanConfig, ClanPaths
+from .budget import STOP_REASONS, Budget, Limits
+from .config import ClanConfig, ClanPaths, update_state
 from .loop import NudgeLoop
 from .output import OutputTail
 
@@ -40,6 +41,16 @@ def run(runtime, cfg: ClanConfig, role: str, hd: Path, channel_dir: Path,
     state = {"n": 0, "session_id": session_file.read_text().strip()
              if session_file.exists() else None}
     current: dict = {}
+    budget = Budget(Limits.from_env(env, cfg.roles[role].harness), time.monotonic)
+
+    def publish(reason=None):
+        record = {**budget.snapshot(), 'reason': reason,
+                  'at': runtime.datetime.now(timezone.utc).isoformat(timespec='seconds')}
+        update_state(paths, lambda s: s.setdefault('runs', {}).__setitem__(role, record))
+        if reason:
+            print(f"ratel: {role} stopped: {STOP_REASONS[reason]}", file=sys.stderr)
+
+    publish()
 
     def _kill_current() -> None:
         pid = current.get("pid")
@@ -61,7 +72,11 @@ def run(runtime, cfg: ClanConfig, role: str, hd: Path, channel_dir: Path,
             number = getattr(signal, sig)
             previous_handlers[number] = signal.signal(number, _on_signal)
 
-    def run_round(prompt: str) -> None:
+    def run_round(prompt: str):
+        if reason := budget.reason():
+            publish(reason)
+            return False
+        budget.rounds += 1
         reset = False
         if confined(hd, "reset").exists():          # `clan checkpoint` left a rewind marker
             confined(hd, "reset").unlink()
@@ -126,6 +141,8 @@ def run(runtime, cfg: ClanConfig, role: str, hd: Path, channel_dir: Path,
                                       channel_dir=channel_dir, project_dir=project_dir,
                                       session_id=state.get("session_id"),
                                       home=paths.home)
+            if budget.limits.round_usd is not None:
+                argv[1:1] = ['--max-budget-usd', str(budget.limits.round_usd)]
             if state["n"] == 1:                     # a session begins: round 1, or the reset round
                 runtime.record_round_session(paths, role, extra)   # (round 1's --session-id, or the gate)
             logged = list(argv)                     # prompt-free, wherever it sits
@@ -147,7 +164,7 @@ def run(runtime, cfg: ClanConfig, role: str, hd: Path, channel_dir: Path,
             t_err = threading.Thread(daemon=True, target=pump, args=(p.stderr, "stderr"))
             t_out.start()
             t_err.start()
-            deadline = time.monotonic() + timeout_s
+            deadline = min(time.monotonic() + timeout_s, budget.deadline)
             while True:
                 try:
                     p.wait(timeout=0.5)
@@ -215,10 +232,17 @@ def run(runtime, cfg: ClanConfig, role: str, hd: Path, channel_dir: Path,
                   "logs": full_logs, "reset": reset}
         with open(rounds_path, "a") as f:
             f.write(json.dumps(record) + "\n")
+        budget.finish(record['returncode'])
+        reason = budget.reason()
+        publish(reason)
+        return False if reason else None
 
     try:
-        run_round(runtime.default_prompt(cfg, role))
-        NudgeLoop(run_round, stdin=stdin, log=confined(hd, "nudges.log")).run()
+        if run_round(runtime.default_prompt(cfg, role)) is not False:
+            NudgeLoop(run_round, stdin=stdin, log=confined(hd, "nudges.log"),
+                      deadline=budget.deadline, fail_fast=True).run()
+            if budget.reason() == 'max_seconds':
+                publish('max_seconds')
     finally:
         _kill_current()
         for number, handler in previous_handlers.items():

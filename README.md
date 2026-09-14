@@ -94,6 +94,30 @@ legacy messages first if needed, then run `ratel migrate-state --channel harbor`
 need no state import. Full headless output can be streamed to per-round files with
 `CLAN_ROUND_LOG=full`; round records keep bounded stdout/stderr tails.
 
+## Run limits and maintenance
+
+Headless roles stop after 100 rounds, eight hours (including idle time), or three consecutive
+failed rounds. Set `CLAN_MAX_ROUNDS`, `CLAN_MAX_SECONDS` and `CLAN_MAX_FAILURES` before launching
+to change those per-role, per-launch limits. Checkpoints do not reset them. Status and the board
+show the stop reason, and the watcher stops nudging that role. An operator launch starts a new
+budget. `CLAN_ROUND_BUDGET_USD` additionally passes a per-round spend cap to `claude-p`;
+other harnesses reject it. See [the limits contract](docs/cli-contract.md#headless-run-limits).
+
+Maintenance is offline: stop all writers and run `ratel clan down` for a clan first.
+Both commands below are dry runs unless `--apply` is supplied:
+
+```bash
+ratel archive --channel harbor
+ratel retain --channel harbor --older-than-days 30
+ratel retain --channel harbor --older-than-days 30 --apply --destination /backups/harbor-20260914
+```
+
+The destination must be a new directory outside channel storage with an existing parent.
+`archive --apply --destination PATH` copies the complete channel and leaves its source intact.
+`retain --apply` first creates that verified backup, then removes only old, unreferenced
+attachments and orphan full-output logs. Messages, plans, configuration and worktrees remain.
+See [backup and restore](docs/cli-contract.md#offline-archive-and-retention).
+
 ## Tests
 
 ```bash

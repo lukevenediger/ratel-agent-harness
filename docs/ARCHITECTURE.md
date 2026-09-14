@@ -39,7 +39,7 @@ Module map:
 | `ratel/unread.py` | hook: render unread as text, advance cursor |
 | `ratel/board.py` | `ThreadingHTTPServer`: routes, SSE loop, file allowlist, unfurl endpoint |
 | `ratel/unfurl.py` | GitHub PR/issue and Google Doc unfurls, TTL cache, never raises |
-| `ratel/static/board.html` | The whole UI: inline CSS + JS, no build step. One vendored asset beside it (`static/mermaid.min.js`, pinned in `static/VENDOR.md`), loaded lazily from `/static/` and only when a diagram needs it |
+| `ratel/static/board.html` | UI markup and CSS; ordered state/render/network JavaScript sources are assembled inline, no build step. One vendored asset beside it (`static/mermaid.min.js`, pinned in `static/VENDOR.md`), loaded lazily from `/static/` and only when a diagram needs it |
 
 ## On-disk layout
 
@@ -350,3 +350,26 @@ context outside the current window. Replies appear in the timeline and open thei
 thread. Loading older history prepends rows while preserving the current scroll anchor and
 SSE cursor. DOM size grows only with explicitly loaded pages and live arrivals; there is no
 virtualization or eviction in this phase.
+
+
+### Run budgets and offline maintenance
+
+`clan/budget.py` holds pure limit validation and counters. The supervisor checks them before
+launch and after each result, caps the subprocess deadline by remaining elapsed time, and
+publishes counters/stop codes under SQLite `runs[role]`. Conversation resets leave the budget
+alone. `NudgeLoop` uses a bounded input queue when a deadline is present so an idle terminal
+cannot keep the run alive indefinitely; supervision errors propagate rather than trigger an
+unbounded retry loop. The watcher omits stopped roles, and status/the board display the reason.
+Budgets are per launch, not provider account quotas. Optional Claude spend enforcement is
+passed through to its documented print-mode flag; unsupported harnesses fail explicitly.
+
+`retention.py` implements dry-run `archive` and `retain`. Lifecycle startup clears
+`maintenance_ready`; successful `clan down` sets it after session/round shutdown and clears
+tabs. Maintenance refuses ambiguous clan activity and remaining round ledgers. During apply,
+a SQLite write lock serializes cooperating database writers while a separate read connection
+feeds the SQLite backup API. Stable file inventories, content hashes and database integrity
+checks precede any orphan removal. Archive destinations are exclusive, private directories
+outside channel storage. Referenced files and all messages/configuration/plans/worktrees remain;
+retention only removes old orphan attachments or unreferenced generated full logs. External
+writers must be stopped; the filesystem is not transactionally locked. Restoring means copying
+a verified archive to a new offline channel, never overwriting an active one.

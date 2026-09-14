@@ -1082,3 +1082,61 @@ def test_supervisor_reports_capture_failure(clan, monkeypatch):
     record = json.loads((paths.harness_dir('developer') / 'rounds.jsonl').read_text())
     assert record['returncode'] == 'error'
     assert 'output capture failed' in record['output']
+
+
+@pytest.mark.parametrize('limit,rc,reason', [('CLAN_MAX_ROUNDS', 0, 'max_rounds'),
+                                          ('CLAN_MAX_FAILURES', 1, 'max_failures')])
+def test_supervisor_stops_launching_at_budget(clan, monkeypatch, limit, rc, reason):
+    cfg, paths = clan
+    cfg.roles['developer'].harness = 'opencode-run'
+    H.write_configs(paths, cfg, 'developer', worktree='/tmp/wt')
+    monkeypatch.setenv(limit, '2')
+    monkeypatch.setattr(FakePopen, 'next_rc', rc)
+    cls = install_popen(monkeypatch, FakePopen)
+    H.launch(paths, cfg, 'developer', worktree='/tmp/wt', unattended=True,
+             stdin=io.StringIO('next\nnext\nnext\n'))
+    assert len(cls.procs) == 2
+    run = C.read_state(paths)['runs']['developer']
+    assert run['reason'] == reason and run['rounds'] == 2
+
+
+def test_supervisor_passes_provider_spend_limit(clan, monkeypatch):
+    cfg, paths = clan
+    cfg.roles['developer'].harness = 'claude-p'
+    H.write_configs(paths, cfg, 'developer', worktree='/tmp/wt')
+    monkeypatch.setenv('CLAN_ROUND_BUDGET_USD', '1.25')
+    cls = install_popen(monkeypatch, FakePopen)
+    H.launch(paths, cfg, 'developer', worktree='/tmp/wt', unattended=True, stdin=io.StringIO())
+    argv = cls.procs[0].argv
+    assert argv[argv.index('--max-budget-usd') + 1] == '1.25'
+
+
+def test_launch_deadline_kills_running_round_and_stops(clan, monkeypatch):
+    cfg, paths = clan
+    cfg.roles['developer'].harness = 'opencode-run'
+    H.write_configs(paths, cfg, 'developer', worktree='/tmp/wt')
+    monkeypatch.setenv('CLAN_MAX_SECONDS', '0.1')
+    monkeypatch.setenv('CLAN_ROUND_TIMEOUT', '60')
+    cls = install_popen(monkeypatch, HangingPopen)
+    H.launch(paths, cfg, 'developer', worktree='/tmp/wt', unattended=True,
+             stdin=io.StringIO('retry\nretry\n'))
+    assert len(cls.procs) == 1 and cls.procs[0].killed
+    assert C.read_state(paths)['runs']['developer']['reason'] == 'max_seconds'
+
+
+def test_checkpoint_does_not_reset_launch_budget(clan, monkeypatch):
+    cfg, paths = clan
+    cfg.roles['developer'].harness = 'opencode-run'
+    hd = H.write_configs(paths, cfg, 'developer', worktree='/tmp/wt')
+    monkeypatch.setenv('CLAN_MAX_ROUNDS', '2')
+    class Checkpoint(FakePopen):
+        def __init__(self, *args, **kwargs):
+            super().__init__(*args, **kwargs)
+            (hd / 'reset').touch()
+    cls = install_popen(monkeypatch, Checkpoint)
+    H.launch(paths, cfg, 'developer', worktree='/tmp/wt', unattended=True,
+             stdin=io.StringIO('next\nnext\nnext\n'))
+    assert len(cls.procs) == 2
+    records = [json.loads(line) for line in (hd / 'rounds.jsonl').read_text().splitlines()]
+    assert [r['round'] for r in records] == [1, 1]
+    assert C.read_state(paths)['runs']['developer']['reason'] == 'max_rounds'

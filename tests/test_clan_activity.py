@@ -63,7 +63,7 @@ def test_activity_row_shape_is_exact(home):
         "harness", "model", "writer", "effort", "model_expired", "branch",
         "worktree", "tab_id", "pane_id", "nudged_at", "nudged_thread", "nudged_by",
         "escalated", "pending", "context_tokens", "checkpoint_at",
-        "last_checkpoint", "last_nudge", "busy", "round", "awaiting"}
+        "last_checkpoint", "last_nudge", "busy", "round", "awaiting", "stop_reason"}
     assert row["state"] == "idle" and row["confidence"] == "weak"
     assert row["reasons"] == [S.R_QUIET.format(seconds=S.QUIET_WINDOW_S)]
     assert row["up"] is True and row["round"] is None and row["busy"] is False
@@ -422,3 +422,13 @@ def test_activity_reads_never_write_a_channel_dir(home):
     before = (state_p.read_bytes(), state_p.stat().st_mtime_ns)
     S.activity(paths, samples={})
     assert (state_p.read_bytes(), state_p.stat().st_mtime_ns) == before
+
+
+
+def test_budget_stop_is_visible_over_pending_nudges(home):
+    paths, _ = _seed(home, roles={'developer': ('opencode-run', True)},
+                     tabs={'developer': {'pane_id': 1}}, watch={'nudged': {'developer': {'at': 'now'}}})
+    C.update_state(paths, lambda s: s.update(runs={'developer': {'reason': 'max_rounds', 'at': 'now'}}))
+    row = _row(S.activity(paths))
+    assert row['state'] == 'stopped' and row['stop_reason'] == 'max_rounds'
+    assert row['reasons'] == ['maximum rounds reached']

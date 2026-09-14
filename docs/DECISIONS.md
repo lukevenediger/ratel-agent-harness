@@ -459,7 +459,7 @@ is migrated by development or tests.
    streamed opt-in full logs and useful failure excerpts. R16: `ratel doctor` for configuration,
    binaries, credential presence (never values), worktrees and storage. Acceptance: adapter
    contracts, failure-path tests, bounded-memory output tests and redaction tests.
-5. **Bounded unattended runs and retention — pending.** R15: maximum rounds, elapsed time,
+5. **Bounded unattended runs and retention — implemented and verified.** R15: maximum rounds, elapsed time,
    consecutive failures and provider-supported token/spend budgets, with visible stop reasons.
    R17: dry-run archive/retention tooling that excludes active clans, retains referenced files,
    and uses SQLite-aware backup. Acceptance: deterministic budget tests, active-clan safeguards,
@@ -610,3 +610,42 @@ failed migration, unsupported versions, WAL reads during writes, bounded unbroke
 streamed logs, early session-ID recovery, stderr/capture failures, doctor redaction and its CLI
 error report. The board JavaScript was also compared against its previous inline source to
 verify that the split preserved content. Work item 5 is next; work items 5 and 6 remain pending.
+
+
+**47. Finite headless launches and backup-first orphan retention (2026-09-14).** Work item 5
+of Decision 42 remains stacked on `issue-1`. Headless launches default to 100 attempted rounds,
+eight elapsed hours including idle time, and three consecutive failed rounds. Positive finite
+operator overrides are environment variables; integer counts reject fractional values. Budgets
+are per role per launch and survive conversation checkpoints. A new operator launch starts a
+new budget. SQLite counters/stop codes drive status and the board, and the watcher omits stopped
+roles. Bounded stdin queuing lets idle launches expire; a running round gets the smaller of its
+own timeout and remaining launch time, followed by bounded pipe cleanup.
+
+The optional per-round `CLAN_ROUND_BUDGET_USD` uses Claude's documented print-mode
+`--max-budget-usd` flag. Unsupported harnesses reject it before spawning. No universal token
+cap is claimed, and provider spend enforcement is not an account-wide ratel quota. This avoids
+estimating cost from context size or silently ignoring an unavailable capability.
+
+`archive` and `retain` default to dry runs. Explicit apply requires a fresh destination and
+creates a full SQLite-aware, checksummed backup first. Archive never removes originals;
+retention removes only aged orphan attachments and unreferenced generated output logs.
+Messages (including malformed records), state, plans, config and round records protect their
+references. Conservative filename matching can keep extra files. Referenced full logs and all
+message history remain, so this is safe orphan cleanup rather than automatic history expiry.
+Clans must be explicitly down; tabs, uncertain lifecycle state, remaining round ledgers and
+pending approvals block maintenance. Startup clears the shutdown marker. Database write locking
+and source inventory/hash checks detect ordinary races, but all external writers must still be
+stopped. No live home was used and no operator data was removed by development.
+
+Verification: the full `NODE_PATH=<Playwright node_modules> RATEL_HOME=<scratch> uv run
+--frozen pytest -q --tb=short` run passed **792 tests**, with **6 opt-in tests deselected**,
+including Chromium and isolated real Zellij sessions. After the final input-error propagation
+and backup-parent-directory fsync changes, the affected budget/input, fake-harness and retention
+suites passed **47 tests** (including one added input-error regression). Ruff and
+`git diff --check` passed. An idle process with a blocking stdin pipe exited cleanly on its
+deadline. Regression cases cover consecutive failures, success resets, checkpoint-resistant
+round limits, running/idle elapsed limits, provider flag/refusal, stopped-role routing, unknown
+stop metadata, default dry runs, WAL-backed restore of messages/pins/cursors/state/attachments,
+active/uncertain clan refusal, changed-file aborts, destination collisions, special-file and
+symlink refusal, and direct/encoded/plan/round/malformed-message references. Work item 6
+(continuous verification and onboarding) remains pending.

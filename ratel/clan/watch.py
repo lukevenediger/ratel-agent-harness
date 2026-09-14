@@ -24,6 +24,7 @@ from typing import Any, Callable
 
 from ..bus import Bus, now_iso
 from ..ulid import is_ulid
+from .budget import stopped_reason
 from .config import ClanPaths, read_state, update_state
 from .context import context_tokens
 from .prompts import _CTRL, detect_prompt
@@ -126,6 +127,8 @@ class Watcher:
         tolerated the pane lag) is re-resolved once and written back."""
         tabs = {}
         for r, v in (state.get("tabs") or {}).items():
+            if stopped_reason(state, r):
+                continue
             pane = v.get("pane_id")
             if pane is None:
                 # The router must outlive a dead server; nudge is the caller
@@ -154,7 +157,7 @@ class Watcher:
             elapsed = self.clock() - info.get("ts", 0)
             if role == self.orchestrator or info.get("escalated") or elapsed < self.stale_s:
                 continue
-            if role in awaiting:            # blocked on a dialog: the stakeholder's, not the
+            if role not in tabs or role in awaiting:            # blocked on a dialog: the stakeholder's, not the
                 continue                    # orchestrator's — and not silence
             info["escalated"] = True
             out.append(Nudge(role=self.orchestrator, pane=tabs[self.orchestrator], kind="stale",

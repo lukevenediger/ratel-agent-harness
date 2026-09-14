@@ -15,6 +15,8 @@ STATE_VERSION = 1
 
 
 class ClanState(TypedDict, total=False):
+    maintenance_ready: bool
+    runs: dict[str, dict]
     session: str
     checkout: str
     tabs: dict[str, dict]
@@ -32,7 +34,7 @@ def store_for(paths):
 def validate(doc):
     if not isinstance(doc, dict):
         raise ValueError('clan state must be an object')
-    for key in ('tabs', 'watch', 'writers', 'briefs', 'env'):
+    for key in ('tabs', 'watch', 'writers', 'briefs', 'env', 'runs'):
         if key in doc and not isinstance(doc[key], dict):
             raise ValueError(f'clan state {key} must be an object')
     for key in ('session', 'checkout'):

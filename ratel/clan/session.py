@@ -20,6 +20,7 @@ from ..schema import validate_name
 from ..storage import Store
 from ..ulid import is_ulid
 from . import approval, harness
+from .budget import STOP_REASONS, stopped_reason
 from .config import (
     CATALOG_ERRORS,
     HARNESSES,
@@ -398,7 +399,7 @@ def new(home: Path, checkout: str | Path, issue: int, session: str | None = None
         harness.mark_trusted(checkout)      # first-run trust dialog — pre-mark the path
 
     update_state(paths, lambda s: s.update(
-        session=zsession, python=sys.executable, unattended=bool(unattended), env=env,
+        session=zsession, python=sys.executable, unattended=bool(unattended), env=env, maintenance_ready=False, runs={},
         checkout=str(checkout), writers={"orchestrator": cfg.roles["orchestrator"].writer},
         briefs={"orchestrator": cfg.roles["orchestrator"].brief},
         created=datetime.now(timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z"),
@@ -440,6 +441,7 @@ def up(paths: ClanPaths) -> dict:
                  "`clan down` killed it (a reboot also drops an exited one). "
                  "Run `ratel clan new <checkout> <issue>` to start a fresh session, "
                  "then `clan up`.")
+    update_state(paths, lambda s: s.update(maintenance_ready=False))
     branch = f"issue-{cfg.issue}"
     todo = [r for r in cfg.roles if r != "orchestrator" and r not in (state.get("tabs") or {})]
     todo.sort(key=lambda r: not cfg.roles[r].writer)     # the writer creates the branch
@@ -502,7 +504,7 @@ def watch(paths: ClanPaths) -> None:
 
 # Node state vocabulary — exclusive, first match wins. `board.html` carries the
 # same list in mapState and a test asserts they are equal.
-ACTIVITY_STATES = ("gone", "awaiting-operator", "stuck", "context-full", "busy", "queued",
+ACTIVITY_STATES = ("gone", "stopped", "awaiting-operator", "stuck", "context-full", "busy", "queued",
                    "online", "idle", "offline")
 CONFIDENCES = ("measured", "inferred", "weak")
 ONLINE_WINDOW_S = 300
@@ -724,10 +726,17 @@ def _activity_from(paths: ClanPaths, cfg: ClanConfig, state: dict,
         cp_ts = [_as_str(c.get("ts")) for c in checkpoints if c.get("role") == role]
         reasons: list[str] = []
         since = None
+        runs = state.get('runs')
+        run = runs.get(role, {}) if isinstance(runs, dict) else {}
+        stop_reason = stopped_reason(state, role)
         # -- node state: exclusive, first match wins --
         if not tab:
             state_name, confidence = "gone", "weak"
             reasons.append(R_NO_TAB)
+        elif stop_reason in STOP_REASONS:
+            state_name, confidence = 'stopped', 'measured'
+            reasons.append(STOP_REASONS[stop_reason])
+            since = run.get('at')
         elif aw is not None:
             # a dialog explains the silence: not stuck, not busy — the
             # operator's to answer, and the watcher has already said so
@@ -793,6 +802,7 @@ def _activity_from(paths: ClanPaths, cfg: ClanConfig, state: dict,
                             "by": _as_str(nd.get("by"))} if nd else None),
             "busy": _is_busy(state, role),
             "round": rnd if headless else None,
+            "stop_reason": stop_reason if stop_reason in STOP_REASONS else None,
             "awaiting": {"at": _as_str(aw.get("at")), "text": aw_text} if aw else None,
         })
     return {"session": state.get("session", cfg.channel), "channel": cfg.channel,
@@ -1056,6 +1066,6 @@ def down(paths: ClanPaths, prune_worktrees: bool = False, force: bool = False) -
             if tab.get("worktree"):
                 remove_worktree(cfg.checkout, tab["worktree"], force=force)
                 removed.append(tab["worktree"])
-    update_state(paths, lambda s: s.__setitem__("tabs", {}))
+    update_state(paths, lambda s: s.update(tabs={}, maintenance_ready=True))
     return {"session": state.get("session", cfg.channel), "worktrees_removed": removed,
             "rounds_killed": killed_rounds}
