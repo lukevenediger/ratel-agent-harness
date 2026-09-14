@@ -78,7 +78,8 @@ def add_parser(sub: argparse._SubParsersAction) -> None:
     p.add_argument("role")
 
     p = cs.add_parser("down", parents=[common], help="kill the session")
-    p.add_argument("--prune-worktrees", action="store_true", help="also remove the worktrees it made")
+    p.add_argument("--prune-worktrees", action="store_true", help="also remove clean worktrees it made")
+    p.add_argument("--force", action="store_true", help="with --prune-worktrees, discard uncommitted changes")
 
 
 def _home(args) -> Path:
@@ -120,5 +121,5 @@ def run(args: argparse.Namespace) -> Any:
     if cmd == "sync":
         return session.sync(paths, args.role)
     if cmd == "down":
-        return session.down(paths, prune_worktrees=args.prune_worktrees)
+        return session.down(paths, prune_worktrees=args.prune_worktrees, force=args.force)
     raise AssertionError(f"unhandled clan command {cmd}")  # pragma: no cover

@@ -100,17 +100,17 @@ def test_settings_json_carries_the_unread_hook_with_env_inline(clan):
 
 def test_settings_hook_command_survives_shell_metacharacters(tmp_path):
     import shlex
-    home = tmp_path / "my home"
-    paths = C.ClanPaths(home, "chan; nel").ensure()
+    home = tmp_path / "my; home"
+    paths = C.ClanPaths(home, "chan-nel").ensure()
     cfg = C.ClanConfig.from_dict(
-        {"channel": "chan; nel", "issue": 42, "repo": "o/r", "checkout": str(tmp_path),
+        {"channel": "chan-nel", "issue": 42, "repo": "o/r", "checkout": str(tmp_path),
          "roles": {"reviewer": {"model": "m"}, "developer": {}}},
         C.load_catalog(tmp_path)).validate()
     H.write_configs(paths, cfg, "reviewer", worktree="/tmp/wt")
     cmd = json.loads((paths.harness_dir("reviewer") / "settings.json").read_text()
                      )["hooks"]["UserPromptSubmit"][0]["hooks"][0]["command"]
     parts = shlex.split(cmd)
-    assert parts[:3] == ["AGENT_NAME=reviewer", "CHANNEL=chan; nel",
+    assert parts[:3] == ["AGENT_NAME=reviewer", "CHANNEL=chan-nel",
                          f"RATEL_HOME={home}"]
     assert parts[-3:] == [sys.executable, "-m", "ratel.unread"]
 
@@ -1019,3 +1019,18 @@ def test_missing_env_reports_unset_keys_per_role(clan):
     unset = H.missing_env(cfg, models, environ={})
     assert unset == {"developer": ["DEEPSEEK_API_KEY"]}
     assert H.missing_env(cfg, models, environ={"DEEPSEEK_API_KEY": "sk-x"}) == {}
+
+
+def test_write_configs_refuses_symlink_file(home, tmp_path):
+    paths = C.ClanPaths(home, 'test').ensure()
+    cfg = C.ClanConfig.from_dict(
+        {'channel': 'test', 'issue': 42, 'repo': 'o/r', 'checkout': str(tmp_path),
+         'roles': {'developer': {}}}, C.load_catalog(home)).validate()
+    hd = paths.harness_dir('developer')
+    hd.mkdir()
+    outside = tmp_path / 'keep'
+    outside.write_text('untouched')
+    (hd / 'settings.json').symlink_to(outside)
+    with pytest.raises(ValueError, match='symlink'):
+        H.write_configs(paths, cfg, 'developer')
+    assert outside.read_text() == 'untouched'

@@ -10,14 +10,16 @@ import os
 import tempfile
 from pathlib import Path
 
+from .paths import confined
+from .schema import is_message, valid_timestamp, validate_name
 from .storage import Store
 
 
 def messages(path: Path):
-    from .bus import is_message
     if not path.exists():
         return [], 0
     out, skipped = [], 0
+    path = confined(path.parent, path.name)
     with path.open("rb") as f:
         for raw in f:
             try:
@@ -35,18 +37,23 @@ def cursors(directory: Path):
     out = {}
     for path in sorted(directory.glob("*.json")):
         try:
-            doc = json.loads(path.read_text())
+            validate_name(path.stem, "agent")
+            doc = json.loads(confined(directory, path.name).read_text())
         except (ValueError, UnicodeDecodeError):
             continue
-        if isinstance(doc, dict):
+        if (isinstance(doc, dict) and valid_timestamp(doc.get("ts"))
+                and (doc.get("last_read") is None or isinstance(doc["last_read"], str))):
             out[path.stem] = doc
     return out
 
 
+def invalid_cursors(directory: Path):
+    return len(list(directory.glob("*.json"))) - len(cursors(directory))
+
+
 def migrate(channel_dir: Path):
-    from .bus import valid_timestamp, validate_name
-    target = channel_dir / "channel.sqlite3"
-    source = channel_dir / "bus.jsonl"
+    target = confined(channel_dir, "channel.sqlite3")
+    source = confined(channel_dir, "bus.jsonl")
     if target.exists():
         raise ValueError("channel already uses SQLite; import was not repeated")
     if not source.is_file():

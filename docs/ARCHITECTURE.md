@@ -62,7 +62,7 @@ an unmigrated channel fails with the migration command rather than silently chan
 
 ### Transactions and delivery order
 
-`storage.py` owns schema version 1 (`PRAGMA user_version`). `messages` stores a unique public
+`storage.py` owns schema version 2 (`PRAGMA user_version`). `messages` stores a unique public
 ULID, indexed parent ID, full JSON message and an `INTEGER PRIMARY KEY AUTOINCREMENT` sequence.
 The sequence defines append order; ULIDs only identify messages. `since` resolves the public
 ID to its sequence. An unknown cursor replays from the beginning, preferring duplicates to
@@ -297,3 +297,16 @@ channel root — which holds `clan.state.json` — is excluded from every role's
 add-dir by design.
 
 `rounds.jsonl` can contain secrets and is never attached to the channel or a PR.
+
+Storage safety uses shared structural validation in `schema.py` and channel path containment
+in `paths.py`. Readers skip malformed nested records; `ratel diagnostics` reports counts.
+Channel paths reject symlinks, including database sidecars; the selected home remains trusted.
+These checks are not a sandbox against another process with the same filesystem permissions.
+
+Schema 2 adds `approval_applications`. A board decision checks the latest proposal under the
+same SQLite write transaction as its insertion. Applying it freezes the resolved configuration
+and state snapshot in a committed intent, atomically replaces clan.toml, updates clan.state.json
+under flock with fsync, then marks the intent complete. Lifecycle readers refuse pending intents;
+`clan approve` recovers them before processing another decision. Runtime state remains JSON until work item 4;
+clan.toml remains operator-editable. This protocol provides retry recovery across the two files.
+Version 1 channels remain readable and upgrade transactionally when opened for writing.

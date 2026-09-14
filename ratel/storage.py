@@ -11,7 +11,16 @@ import time
 from contextlib import contextmanager
 from pathlib import Path
 
-SCHEMA_VERSION = 1
+from .paths import confined
+from .schema import is_message, valid_timestamp, validate_limit, validate_message, validate_name
+
+NO_PROPOSAL_CHECK = object()
+SCHEMA_VERSION = 2
+APPLICATIONS = (
+    "CREATE TABLE approval_applications (approval_id TEXT PRIMARY KEY, config TEXT NOT NULL CHECK(json_valid(config)), "
+    "pending INTEGER NOT NULL CHECK(pending IN (0,1)))",
+    "CREATE UNIQUE INDEX one_pending_approval ON approval_applications(pending) WHERE pending=1",
+)
 SCHEMA = (
     "CREATE TABLE messages (seq INTEGER PRIMARY KEY AUTOINCREMENT, id TEXT NOT NULL UNIQUE, "
     "parent TEXT, doc TEXT NOT NULL CHECK(json_valid(doc)) "
@@ -27,17 +36,24 @@ SCHEMA = (
 
 
 class Store:
-    def __init__(self, path: Path):
-        self.path = path
+    def __init__(self, path: Path, root: Path | None = None):
+        self.path = path.absolute()
+        self.root = (root or self.path.parent).absolute()
+
+    def check_path(self):
+        relative = self.path.relative_to(self.root)
+        for suffix in ("", "-wal", "-shm", "-journal"):
+            confined(self.root, str(relative) + suffix)
 
     @contextmanager
     def connection(self, write=False, create=False):
+        self.check_path()
         mode = "rwc" if create else "rw" if write else "ro"
         con = sqlite3.connect(self.path.resolve().as_uri() + f"?mode={mode}", uri=True,
                               timeout=5, isolation_level=None)
         try:
             con.execute("PRAGMA foreign_keys=ON")
-            if not create and con.execute("PRAGMA user_version").fetchone()[0] != SCHEMA_VERSION:
+            if not create and con.execute("PRAGMA user_version").fetchone()[0] not in (1, SCHEMA_VERSION):
                 raise ValueError("unsupported channel database schema; upgrade ratel before opening it")
             if write:
                 con.execute("BEGIN IMMEDIATE")
@@ -52,6 +68,7 @@ class Store:
             con.close()
 
     def initialize(self):
+        self.check_path()
         # Set WAL outside a transaction, once when a writer opens the channel.
         con = sqlite3.connect(self.path, timeout=0, isolation_level=None)
         try:
@@ -59,7 +76,7 @@ class Store:
             while True:
                 try:
                     version = con.execute("PRAGMA user_version").fetchone()[0]
-                    if version not in (0, SCHEMA_VERSION):
+                    if version not in (0, 1, SCHEMA_VERSION):
                         raise ValueError("unsupported channel database schema; upgrade ratel before opening it")
                     con.execute("PRAGMA journal_mode=WAL")
                     break
@@ -79,6 +96,9 @@ class Store:
             if version == 0:
                 for sql in SCHEMA:
                     con.execute(sql)
+            if version in (0, 1):
+                for sql in APPLICATIONS:
+                    con.execute(sql)
                 con.execute(f"PRAGMA user_version={SCHEMA_VERSION}")
             elif version != SCHEMA_VERSION:
                 raise ValueError("unsupported channel database schema; upgrade ratel before opening it")
@@ -93,17 +113,24 @@ class Store:
 
     @staticmethod
     def cursor(con, agent):
-        row = con.execute("SELECT last_seq FROM cursors WHERE agent=?", (agent,)).fetchone()
-        return row[0] if row else 0
+        row = con.execute("SELECT last_seq,ts FROM cursors WHERE agent=?", (agent,)).fetchone()
+        if not row or type(row[0]) is not int or row[0] < 0 or not valid_timestamp(row[1]):
+            return 0
+        exists = con.execute("SELECT 1 FROM messages WHERE seq=?", (row[0],)).fetchone()
+        return row[0] if exists else 0
 
     @staticmethod
     def advance(con, agent, seq, ts):
+        # Repair malformed cursor values before max(): SQLite otherwise orders
+        # a hostile TEXT value above every integer and the agent stays stuck.
+        current = Store.cursor(con, agent)
         con.execute("INSERT INTO cursors(agent,last_seq,ts) VALUES(?,?,?) "
-                    "ON CONFLICT(agent) DO UPDATE SET last_seq=max(last_seq,excluded.last_seq), ts=excluded.ts",
-                    (agent, seq, ts))
+                    "ON CONFLICT(agent) DO UPDATE SET last_seq=excluded.last_seq, ts=excluded.ts",
+                    (agent, max(current, seq), ts))
 
     @staticmethod
     def insert(con, msg):
+        validate_message(msg)
         seq = con.execute("INSERT INTO messages(id,parent,doc) VALUES(?,?,?)",
                           (msg["id"], msg.get("parent"), json.dumps(msg, ensure_ascii=False))).lastrowid
         Store.apply_pin(con, msg, seq)
@@ -119,8 +146,20 @@ class Store:
         if isinstance(msg.get("unpin"), str):
             con.execute("DELETE FROM pins WHERE message_id=?", (msg["unpin"],))
 
-    def post(self, msg, advance_sender=False):
+    def post(self, msg, advance_sender=False, expected_proposal=NO_PROPOSAL_CHECK):
         with self.connection(write=True) as con:
+            if expected_proposal is not NO_PROPOSAL_CHECK:
+                self.check_proposal(con, expected_proposal)
+                for _, doc in reversed(self.rows(con)):
+                    previous = json.loads(doc)
+                    if previous["from"] != "stakeholder":
+                        continue
+                    for att in previous.get("attachments", []):
+                        if att.get("type") == "clan" and att.get("status") == "approved" \
+                                and att.get("supersedes") == expected_proposal:
+                            if previous.get("attachments") == msg.get("attachments"):
+                                return previous  # retries of the same decision are idempotent
+                            raise ValueError("proposal already approved with different roles; propose a new clan")
             tip = con.execute("SELECT coalesce(max(seq),0) FROM messages").fetchone()[0]
             caught_up = self.cursor(con, msg["from"]) == tip
             seq = self.insert(con, msg)
@@ -130,10 +169,56 @@ class Store:
 
     @staticmethod
     def rows(con, since=0, limit=None):
-        if limit is not None and (isinstance(limit, bool) or limit <= 0):
-            raise ValueError("limit must be positive")
-        return con.execute("SELECT seq,doc FROM messages WHERE seq>? ORDER BY seq LIMIT ?",
-                           (since, limit if limit is not None else -1)).fetchall()
+        validate_limit(limit)
+        rows = []
+        for row in con.execute("SELECT seq,doc FROM messages WHERE seq>? ORDER BY seq", (since,)):
+            if Store.decode(row[1]) is not None:
+                rows.append(row)
+                if limit is not None and len(rows) >= limit:
+                    break
+        return rows
+
+    @staticmethod
+    def decode(raw):
+        try:
+            doc = json.loads(raw)
+        except (ValueError, TypeError):
+            return None
+        return doc if is_message(doc) else None
+
+    @staticmethod
+    def check_proposal(con, expected):
+        proposals = []
+        for _, raw in Store.rows(con):
+            msg = json.loads(raw)
+            if msg["from"] == "orchestrator" and any(
+                    a.get("type") == "clan" and a.get("status") == "proposed"
+                    for a in msg.get("attachments", [])):
+                proposals.append(msg["id"])
+        if not proposals:
+            raise ValueError("no proposed clan proposal on the bus — an approval must supersede the newest proposal")
+        if expected != proposals[-1]:
+            raise ValueError(f"attachment supersedes {expected!r} but the newest proposed clan message is "
+                             f"{proposals[-1]!r} — approve the newest proposal")
+
+    def diagnostics(self):
+        with self.connection() as con:
+            bad_messages = sum(self.decode(row[0]) is None for row in con.execute("SELECT doc FROM messages"))
+            bad_cursors = 0
+            for agent, seq, ts in con.execute("SELECT agent,last_seq,ts FROM cursors"):
+                try:
+                    validate_name(agent, "agent")
+                    if not valid_timestamp(ts) or type(seq) is not int or seq < 0 or seq != self.cursor(con, agent):
+                        raise ValueError("malformed cursor")
+                except ValueError:
+                    bad_cursors += 1
+            return {"malformed_messages": bad_messages, "malformed_cursors": bad_cursors}
+
+    @staticmethod
+    def pending(con):
+        if con.execute("PRAGMA user_version").fetchone()[0] < 2:
+            return None
+        return con.execute("SELECT approval_id,config FROM approval_applications WHERE pending=1").fetchone()
 
     def read_since(self, since, limit=None):
         if not self.path.exists():
@@ -169,24 +254,36 @@ class Store:
         if not self.path.exists():
             return []
         with self.connection() as con:
-            return con.execute("SELECT agent,ts FROM cursors ORDER BY agent").fetchall()
+            out = []
+            for agent, ts in con.execute("SELECT agent,ts FROM cursors ORDER BY agent"):
+                try:
+                    validate_name(agent, "agent")
+                    if valid_timestamp(ts):
+                        out.append((agent, ts))
+                except ValueError:
+                    continue
+            return out
 
     def thread(self, message_id):
         with self.connection() as con:
             parent = con.execute("SELECT doc FROM messages WHERE id=?", (message_id,)).fetchone()
-            if parent is None:
+            if parent is None or self.decode(parent[0]) is None:
                 return None
             replies = con.execute("SELECT doc FROM messages WHERE parent=? ORDER BY seq", (message_id,))
-            return {"parent": json.loads(parent[0]), "replies": [json.loads(row[0]) for row in replies]}
+            return {"parent": self.decode(parent[0]), "replies": [doc for row in replies
+                                                                  if (doc := self.decode(row[0])) is not None]}
 
     def pins(self):
         with self.connection() as con:
-            return [json.loads(row[0]) for row in con.execute(
-                "SELECT doc FROM pins JOIN messages ON messages.id=pins.message_id ORDER BY ordinal")]
+            return [doc for row in con.execute(
+                "SELECT doc FROM pins JOIN messages ON messages.id=pins.message_id ORDER BY ordinal")
+                    if (doc := self.decode(row[0])) is not None]
 
     def tip(self):
         if not self.path.exists():
             return None
         with self.connection() as con:
-            row = con.execute("SELECT id FROM messages ORDER BY seq DESC LIMIT 1").fetchone()
-            return row[0] if row else None
+            for row in con.execute("SELECT id,doc FROM messages ORDER BY seq DESC"):
+                if self.decode(row[1]) is not None:
+                    return row[0]
+            return None

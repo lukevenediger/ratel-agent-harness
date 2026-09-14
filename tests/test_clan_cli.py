@@ -1309,3 +1309,56 @@ def test_checkpoint_refuses_a_role_checkpointing_itself(home, repo, fake_zellij,
     monkeypatch.setenv("AGENT_NAME", "someone-else")           # only the same name is refused
     rec = clan(home, "checkpoint", "orchestrator", "--mode", "compact", "--channel", "harbor-42")
     assert rec["mode"] == "compact"
+
+
+def test_approval_recovers_interrupted_state_write(home, claned, monkeypatch):
+    from ratel.clan import approval
+    _, msg_id = _approve_msg(home)
+    before = C.read_state(claned)
+    real_update = approval.update_state
+
+    def interrupted(*args, **kwargs):
+        claned.state_json.write_text('{"partial":')
+        raise OSError('simulated interruption')
+
+    monkeypatch.setattr(approval, 'update_state', interrupted)
+    with pytest.raises(OSError, match='interruption'):
+        clansession.approve(claned, msg_id)
+    with pytest.raises(SystemExit, match='pending'):
+        clansession.status(claned)
+    monkeypatch.setattr(approval, 'update_state', real_update)
+    got = clansession.approve(claned, msg_id)
+    state = C.read_state(claned)
+    assert state['checkout'] == before['checkout']
+    assert state['writers'] == {'orchestrator': False, 'developer': True, 'reviewer': False}
+    # Completed applications retain their resolved snapshot even if catalogs break.
+    (home / 'presets.toml').write_text('invalid = [')
+    assert clansession.approve(claned, msg_id) == got
+    with Bus(home, 'harbor-42').store.connection() as con:
+        assert con.execute('SELECT pending FROM approval_applications').fetchall() == [(0,)]
+
+
+def test_down_dirty_preflight_preserves_session_and_state(home, repo, fake_zellij):
+    new_clan(home, repo)
+    add_roles(home, 'harbor-42', {'developer': {}})
+    clan(home, 'up', '--channel', 'harbor-42')
+    paths = C.ClanPaths(home, 'harbor-42')
+    before = C.read_state(paths)
+    worktree = repo.parent / 'harbor-wt' / '42-developer'
+    (worktree / 'unsaved.txt').write_text('keep me')
+    with pytest.raises(SystemExit, match='uncommitted'):
+        clan(home, 'down', '--channel', 'harbor-42', '--prune-worktrees')
+    assert C.read_state(paths) == before
+    assert not FakeZellij.servers[before['session']]['killed']
+    assert (worktree / 'unsaved.txt').read_text() == 'keep me'
+    clan(home, 'down', '--channel', 'harbor-42', '--prune-worktrees', '--force')
+    assert not worktree.exists()
+
+
+def test_down_refuses_redirected_worktree_even_with_force(home, repo, fake_zellij):
+    new_clan(home, repo)
+    paths = C.ClanPaths(home, 'harbor-42')
+    C.update_state(paths, lambda s: s.update(tabs={'orchestrator': {'worktree': str(repo)}}))
+    with pytest.raises(SystemExit, match='expected layout'):
+        clan(home, 'down', '--channel', 'harbor-42', '--prune-worktrees', '--force')
+    assert (repo / 'README.md').exists()

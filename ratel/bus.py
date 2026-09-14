@@ -12,7 +12,16 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from . import legacy
-from .storage import Store
+from .paths import channel_path, confined
+from .schema import (
+    valid_timestamp,
+    validate_attachment,
+    validate_limit,
+    validate_message,
+    validate_name,
+    validate_timeout,
+)
+from .storage import NO_PROPOSAL_CHECK, Store
 from .ulid import is_ulid, ulid
 
 MENTION_RE = re.compile(r"(?<![\w@.])@([A-Za-z0-9][A-Za-z0-9_-]*)")
@@ -28,34 +37,6 @@ def extract_mentions(text: str) -> list[str]:
 
 def now_iso() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="milliseconds").replace("+00:00", "Z")
-
-
-def validate_name(value: str, kind: str = "channel") -> str:
-    if not isinstance(value, str) or not re.fullmatch(r"[A-Za-z0-9_.-]+", value) or value in (".", ".."):
-        raise ValueError(f"invalid {kind} name")
-    return value
-
-
-def valid_timestamp(value) -> bool:
-    if not isinstance(value, str):
-        return False
-    try:
-        return datetime.fromisoformat(value.replace("Z", "+00:00")).tzinfo is not None
-    except ValueError:
-        return False
-
-
-def is_message(doc) -> bool:
-    """Minimum legacy record contract shared by import and read-only browsing."""
-    return (isinstance(doc, dict)
-            and is_ulid(doc.get("id"))
-            and isinstance(doc.get("from"), str)
-            and isinstance(doc.get("text"), str)
-            and isinstance(doc.get("mentions"), list)
-            and all(isinstance(m, str) for m in doc["mentions"])
-            and (doc.get("parent") is None or isinstance(doc["parent"], str))
-            and isinstance(doc.get("attachments", []), list)
-            and all(isinstance(a, dict) for a in doc.get("attachments", [])))
 
 
 def default_home() -> Path:
@@ -89,6 +70,9 @@ def normalize_attachment(att: dict, files_dir: Path | None = None) -> dict:
     if not isinstance(att, dict):
         raise ValueError(f"attachment must be an object, got {type(att).__name__}")
     att = dict(att)
+    for key in ("name", "ref", "mime", "file", "lang", "body", "url"):
+        if key in att and att[key] is not None and not isinstance(att[key], str):
+            raise ValueError(f"attachment {key}: must be a string")
     if not att.get("type"):
         for key, kind in (("ref", "file"), ("url", "link"), ("body", "code"),
                           ("items", "tasks"), ("roles", "clan")):
@@ -97,6 +81,8 @@ def normalize_attachment(att: dict, files_dir: Path | None = None) -> dict:
                 break
         else:
             raise ValueError(f"attachment needs type: {_dumps(att)}")
+    if att["type"] == "link" and "url" not in att and "href" in att:
+        att["url"] = att["href"]
     if att["type"] == "file":
         ref = att.get("ref")
         # A bare "01ABC-DESIGN.md" is attach_file's dest_name with the prefix lost.
@@ -106,23 +92,21 @@ def normalize_attachment(att: dict, files_dir: Path | None = None) -> dict:
                 att["ref"] = f"files/{base}"
         if not att.get("mime"):
             att["mime"] = mimetypes.guess_type(att.get("name") or att.get("ref") or "")[0] or "application/octet-stream"
-    return att
+    return validate_attachment(att)
 
 
 class Bus:
     def __init__(self, home: Path | str, channel: str, read_only: bool = False):
-        self.home = Path(home).expanduser()
+        self.home = Path(home).expanduser().resolve()
         self.channel = validate_name(channel)
-        self.channel_dir = self.home / "channels" / channel
-        if not self.channel_dir.resolve().is_relative_to((self.home / "channels").resolve()):
-            raise ValueError("channel path escapes channels directory")
-        self.bus_path = self.channel_dir / "bus.jsonl"  # legacy input only
-        self.db_path = self.channel_dir / "channel.sqlite3"
-        self.cursors_dir = self.channel_dir / "cursors"  # legacy input only
-        self.files_dir = self.channel_dir / "files"
-        self.plans_dir = self.channel_dir / "plans"
+        self.channel_dir = channel_path(self.home, channel)
+        self.bus_path = channel_path(self.home, channel, "bus.jsonl")
+        self.db_path = channel_path(self.home, channel, "channel.sqlite3")
+        self.cursors_dir = channel_path(self.home, channel, "cursors")
+        self.files_dir = channel_path(self.home, channel, "files")
+        self.plans_dir = channel_path(self.home, channel, "plans")
         self.read_only = read_only
-        self.store = Store(self.db_path)
+        self.store = Store(self.db_path, root=self.home)
         if not read_only:
             if self.bus_path.exists() and not self.db_path.exists():
                 raise ValueError("legacy channel is read-only; stop its writers and run "
@@ -132,16 +116,23 @@ class Bus:
             self.store.initialize()
 
     def _writable(self):
+        self._check_paths()
         if self.read_only:
             raise ValueError("this channel was opened read-only")
 
+    def _check_paths(self):
+        for name in ("bus.jsonl", "channel.sqlite3", "cursors", "files", "plans"):
+            channel_path(self.home, self.channel, name)
+
     @property
     def is_legacy(self):
+        self._check_paths()
         return not self.db_path.exists() and self.bus_path.exists()
 
     def post(self, sender: str, text: str, parent: str | None = None,
              attachments: list[dict] | None = None, pin: bool | str = False,
-             unpin: str | None = None, *, advance_sender: bool = False) -> dict:
+             unpin: str | None = None, *, advance_sender: bool = False,
+             expected_proposal=NO_PROPOSAL_CHECK) -> dict:
         self._writable()
         validate_name(sender, "agent")
         if not isinstance(text, str):
@@ -153,15 +144,26 @@ class Bus:
         msg = {"id": ulid(), "ts": now_iso(), "from": sender, "text": text,
                "parent": parent, "mentions": extract_mentions(text),
                "attachments": [normalize_attachment(a, self.files_dir) for a in (attachments or [])],
-               "pin": pin if isinstance(pin, str) else bool(pin)}
-        if unpin:
+               "pin": pin}
+        if unpin is not None:
             msg["unpin"] = unpin
-        return self.store.post(msg, advance_sender=advance_sender)
+        validate_message(msg)
+        return self.store.post(msg, advance_sender=advance_sender, expected_proposal=expected_proposal)
+
+    def diagnostics(self):
+        self._check_paths()
+        if self.is_legacy:
+            _, skipped = legacy.messages(self.bus_path)
+            return {"malformed_messages": skipped, "malformed_cursors": legacy.invalid_cursors(self.cursors_dir)}
+        if not self.db_path.exists():
+            return {"malformed_messages": 0, "malformed_cursors": 0}
+        return self.store.diagnostics()
 
     def read_all(self) -> list[dict]:
         return self.read_since(None)
 
     def read_since(self, since: str | None, limit: int | None = None) -> list[dict]:
+        validate_limit(limit)
         if self.is_legacy:
             msgs, _ = legacy.messages(self.bus_path)
             start = next((i + 1 for i, m in enumerate(msgs) if m["id"] == since), 0)
@@ -189,6 +191,8 @@ class Bus:
     def set_cursor(self, agent: str, last_read: str | None) -> None:
         self._writable()
         validate_name(agent, "agent")
+        if last_read is not None and not isinstance(last_read, str):
+            raise ValueError("cursor must be a message ID or None")
         self.store.set_cursor(agent, last_read, now_iso())
 
     def touch_cursor(self, agent: str) -> None:
@@ -204,6 +208,7 @@ class Bus:
                 for agent, ts in rows if valid_timestamp(ts)]
 
     def read_thread(self, msg_id: str) -> dict | None:
+        self._check_paths()
         if self.db_path.exists():
             return self.store.thread(msg_id)
         msgs = self.read_all()
@@ -211,6 +216,7 @@ class Bus:
         return {"parent": parent, "replies": [m for m in msgs if m.get("parent") == msg_id]} if parent else None
 
     def pins(self) -> list[dict]:
+        self._check_paths()
         if self.db_path.exists():
             return self.store.pins()
         msgs = self.read_all()
@@ -230,7 +236,9 @@ class Bus:
         src = Path(path).expanduser()
         name = Path(name or src.name).name
         dest_name = f"{ulid()}-{name}"
-        dest = self.files_dir / dest_name
+        if any(ord(c) < 32 or ord(c) == 127 for c in name):
+            raise ValueError("attachment filename must not contain control characters")
+        dest = confined(self.files_dir, dest_name)
         with src.open("rb") as source, dest.open("xb") as target:
             shutil.copyfileobj(source, target)
         mime = mimetypes.guess_type(name)[0] or "application/octet-stream"
@@ -241,6 +249,7 @@ class Bus:
 
     def wait_for_new(self, agent: str, timeout_s: float, mention_only: bool = True,
                      poll_s: float = 0.5) -> list[dict]:
+        validate_timeout(timeout_s)
         deadline = time.monotonic() + timeout_s
         while True:
             new = self.consume(agent, mention_only=mention_only)

@@ -92,6 +92,8 @@ def build_parser() -> argparse.ArgumentParser:
 
     sub.add_parser("migrate", parents=[common],
                    help="import a stopped legacy channel into SQLite; retains original files")
+    sub.add_parser("diagnostics", parents=[common],
+                   help="count malformed messages and cursors without modifying storage")
     sub.add_parser("export", parents=[common], help="write channel messages as JSONL without advancing cursors")
     p = sub.add_parser("tail", parents=[common], help="follow channel messages as JSONL without advancing cursors")
     p.add_argument("--since", help="replay after this message id before following")
@@ -105,11 +107,13 @@ def run(args: argparse.Namespace) -> Any:
     if args.cmd == "clan":
         from .clan.cli import run as clan_run
         return clan_run(args)
-    if args.cmd in ("migrate", "export", "tail"):
+    if args.cmd in ("migrate", "export", "tail", "diagnostics"):
         channel = args.channel or os.environ.get("CHANNEL")
         if not channel:
             raise ValueError("set CHANNEL or pass --channel")
         bus = Bus(args.home or default_home(), channel, read_only=True)
+        if args.cmd == "diagnostics":
+            return bus.diagnostics()
         if args.cmd == "migrate":
             return migrate(bus.channel_dir)
         cursor = args.since if args.cmd == "tail" else None

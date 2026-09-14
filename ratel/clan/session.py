@@ -15,8 +15,11 @@ from pathlib import Path
 from typing import Any, Callable
 
 from ..bus import Bus, now_iso
+from ..paths import channel_path, confined
+from ..schema import validate_name
+from ..storage import Store
 from ..ulid import is_ulid
-from . import harness
+from . import approval, harness
 from .config import (
     CATALOG_ERRORS,
     HARNESSES,
@@ -57,6 +60,11 @@ _NO_STATE = object()
 
 
 def _read_config(paths: ClanPaths) -> ClanConfig:
+    db = paths.channel_dir / "channel.sqlite3"
+    if db.exists():
+        with Store(db, root=paths.home).connection() as con:
+            if Store.pending(con) is not None:
+                raise ClanError("approval application is pending — rerun `ratel clan approve` to recover it")
     if not paths.clan_toml.exists():
         raise ClanError(f"no clan at {paths.clan_toml} — run `ratel clan new` first")
     # the catalog is the user's/`roles.toml` plus the bundled file; a broken one
@@ -151,8 +159,9 @@ def _launch_argv(paths: ClanPaths, channel: str, role: str) -> list[str]:
 
 
 def _worktree_for(cfg: ClanConfig, role: str) -> Path:
+    validate_name(role, "role")
     checkout = Path(cfg.checkout)
-    return checkout.parent / f"{checkout.name}-wt" / f"{cfg.issue}-{role}"
+    return confined(checkout.parent, f"{checkout.name}-wt", f"{cfg.issue}-{role}")
 
 
 def _record_tab(paths: ClanPaths, role: str, info: dict) -> None:
@@ -838,26 +847,17 @@ def propose(paths: ClanPaths, file: str, auto_approve: bool = False) -> dict:
            "roles": proposal.get("roles")}
     validate_clan_attachment(att, clan_catalog(paths.home))
     paths.clan_toml.parent.mkdir(parents=True, exist_ok=True)
-    (paths.channel_dir / "clan" / "proposal.json").write_text(json.dumps(att, indent=2))
+    channel_path(paths.home, paths.channel, "clan", "proposal.json").write_text(json.dumps(att, indent=2))
     bus = Bus(paths.home, cfg.channel)
     msg = bus.post("orchestrator", PROPOSE_TEXT.format(issue=cfg.issue),
                    attachments=[att], pin=True)
     out = {"id": msg["id"], "roles": [r["name"] for r in att["roles"]]}
     if auto_approve:
         approved = {**att, "status": "approved", "supersedes": msg["id"]}
-        out["result"] = _approve_attachment(paths, cfg, approved)
+        confirmation = bus.post("stakeholder", "Clan approved", attachments=[approved],
+                                expected_proposal=msg["id"])
+        out["result"] = approve(paths, confirmation["id"])
     return out
-
-
-def _approve_attachment(paths: ClanPaths, base: ClanConfig, att: dict) -> dict:
-    """Validate an approved attachment and land it as clan.toml + writer bits."""
-    validate_clan_attachment(att, clan_catalog(paths.home))
-    cfg = clan_config_from(att, base, paths.home)
-    cfg.write(paths)
-    update_state(paths, lambda s: s.update(
-        writers={name: spec.writer for name, spec in cfg.roles.items()},
-        briefs={name: spec.brief for name, spec in cfg.roles.items()}))
-    return cfg.to_dict()
 
 
 def _clan_attachments(bus_msgs: list[dict]) -> list[tuple[dict, dict]]:
@@ -871,37 +871,55 @@ def _clan_attachments(bus_msgs: list[dict]) -> list[tuple[dict, dict]]:
 
 
 def approve(paths: ClanPaths, msg_id: str | None = None) -> dict:
-    """Land the newest approved clan attachment (or the named message) as clan.toml."""
-    cfg, _state = _load(paths)
-    bus = Bus(paths.home, cfg.channel)
-    clan_atts = _clan_attachments(bus.read_all())
-    if msg_id is not None:
-        matches = [(m, a) for m, a in clan_atts if m["id"] == msg_id]
-        if not matches:
-            sys.exit(f"ratel clan approve: no clan attachment on message {msg_id}")
-        msg, att = matches[-1]
-        if msg["from"] != "stakeholder":
-            # only the board's token-gated route (or the operator) speaks as
-            # stakeholder; a role must not be able to forge an approval
-            sys.exit(f"ratel clan approve: message {msg_id} is from {msg['from']!r}, "
-                     "not stakeholder — approvals are only trusted from the board")
-    else:
-        approved = [(m, a) for m, a in clan_atts
-                    if a.get("status") == "approved" and m["from"] == "stakeholder"]
-        if not approved:
-            sys.exit("ratel clan approve: no approved clan proposal on the bus")
-        _msg, att = approved[-1]
-    proposed = [m for m, a in clan_atts
-                if a.get("status") == "proposed" and m["from"] == "orchestrator"]
-    if not proposed:
-        sys.exit("ratel clan approve: no proposed clan proposal on the bus — "
-                 "an approval must supersede the newest proposal")
-    newest_proposed = proposed[-1]["id"]
-    if att.get("supersedes") != newest_proposed:
-        sys.exit(f"ratel clan approve: attachment supersedes {att.get('supersedes')!r} "
-                 f"but the newest proposed clan message is {newest_proposed!r} — "
-                 "approve the newest proposal")
-    return _approve_attachment(paths, cfg, att)
+    """Recover an interrupted application, then atomically prepare the newest decision."""
+    bus = Bus(paths.home, paths.channel)
+    approval.recover(paths, bus.store)
+    with bus.store.connection(write=True) as con:
+        # Another applier may have prepared an intent after our recovery. Do
+        # not overwrite it or start lifecycle commands against half-applied files.
+        if bus.store.pending(con) is not None:
+            raise ValueError("approval application is pending — retry clan approve to recover it")
+        clan_atts = _clan_attachments([json.loads(row[1]) for row in bus.store.rows(con)])
+        if msg_id is not None:
+            matches = [(m, a) for m, a in clan_atts if m["id"] == msg_id]
+            if not matches:
+                sys.exit(f"ratel clan approve: no clan attachment on message {msg_id}")
+            msg, att = matches[-1]
+            if msg["from"] != "stakeholder":
+                sys.exit(f"ratel clan approve: message {msg_id} is from {msg['from']!r}, "
+                         "not stakeholder — approvals are only trusted from the board")
+        else:
+            approved = [(m, a) for m, a in clan_atts
+                        if a.get("status") == "approved" and m["from"] == "stakeholder"]
+            if not approved:
+                sys.exit("ratel clan approve: no approved clan proposal on the bus")
+            msg, att = approved[-1]
+        if att.get("status") != "approved":
+            raise ValueError("attachment status must be approved")
+        try:
+            bus.store.check_proposal(con, att.get("supersedes"))
+        except ValueError as e:
+            sys.exit(f"ratel clan approve: {e}")
+        done = approval.completed(con, msg["id"])
+        if done is not None:
+            return done
+        cfg, state = _load(paths)
+        validate_clan_attachment(att, clan_catalog(paths.home))
+        if att["issue"] != cfg.issue:
+            raise ValueError("attachment issue does not match this clan")
+        chosen = clan_config_from(att, cfg, paths.home)
+        approval.prepare(con, chosen, state, msg["id"])
+    # This separate transaction leaves a durable intent if either file write
+    # fails. Recovery uses the resolved snapshot rather than today's catalog.
+    recovered = approval.recover(paths, bus.store)
+    if recovered is not None:
+        return recovered[1]
+    # A concurrent retry may already have completed this exact intent.
+    with bus.store.connection() as con:
+        done = approval.completed(con, msg["id"])
+        if done is None:
+            raise ValueError("approval application is pending — retry clan approve")
+        return done
 
 
 def nudge(paths: ClanPaths, role: str, text: str | None = None) -> dict:
@@ -1014,8 +1032,19 @@ def sync(paths: ClanPaths, role: str) -> dict:
     return {"role": role, "worktree": wt, "head": sync_detached(cfg.checkout, wt, f"issue-{cfg.issue}")}
 
 
-def down(paths: ClanPaths, prune_worktrees: bool = False) -> dict:
+def down(paths: ClanPaths, prune_worktrees: bool = False, force: bool = False) -> dict:
     cfg, state = _load(paths)
+    if force and not prune_worktrees:
+        raise ValueError("--force requires --prune-worktrees")
+    if prune_worktrees:
+        for role, tab in (state.get("tabs") or {}).items():
+            if not tab.get("worktree"):
+                continue
+            path = Path(tab["worktree"])
+            if role not in cfg.roles or path.resolve() != _worktree_for(cfg, role).resolve():
+                raise ValueError("recorded worktree is outside this clan's expected layout; refusing to prune")
+            if path.exists() and not force and is_dirty(path):
+                raise ValueError(f"{path} has uncommitted changes — use --force with --prune-worktrees to discard them")
     _zellij(state, cfg).kill()
     killed_rounds = 0
     for role in cfg.roles:                       # a round outlives its pane: kill its group
@@ -1025,7 +1054,7 @@ def down(paths: ClanPaths, prune_worktrees: bool = False) -> dict:
     if prune_worktrees:
         for tab in (state.get("tabs") or {}).values():
             if tab.get("worktree"):
-                remove_worktree(cfg.checkout, tab["worktree"])
+                remove_worktree(cfg.checkout, tab["worktree"], force=force)
                 removed.append(tab["worktree"])
     update_state(paths, lambda s: s.__setitem__("tabs", {}))
     return {"session": state.get("session", cfg.channel), "worktrees_removed": removed,

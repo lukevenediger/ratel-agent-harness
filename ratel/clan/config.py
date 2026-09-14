@@ -10,6 +10,7 @@ from __future__ import annotations
 import datetime
 import fcntl
 import json
+import os
 import re
 import tomllib
 from dataclasses import dataclass, field
@@ -17,6 +18,8 @@ from pathlib import Path
 from typing import Any, Callable
 
 from ..bus import extract_mentions
+from ..paths import atomic_write, channel_path
+from ..schema import validate_name
 
 HARNESSES = ("claude", "opencode", "claude-p", "opencode-run", "fake")
 CATALOG_PATH = Path(__file__).with_name("roles.toml")
@@ -183,39 +186,42 @@ class ClanPaths:
     channel: str
 
     def __post_init__(self) -> None:
-        self.home = Path(self.home).expanduser()
+        self.home = Path(self.home).expanduser().resolve()
+        validate_name(self.channel)
+        channel_path(self.home, self.channel)
 
     @property
     def channel_dir(self) -> Path:
-        return self.home / "channels" / self.channel
+        return channel_path(self.home, self.channel)
 
     @property
     def clan_toml(self) -> Path:
         # one level down: with acceptEdits, --add-dir makes a whole tree
         # auto-accept territory, so clan.toml must not share a root with
         # clan.state.json or the peers' harness dirs
-        return self.channel_dir / "clan" / "clan.toml"
+        return channel_path(self.home, self.channel, "clan", "clan.toml")
 
     @property
     def state_json(self) -> Path:
-        return self.channel_dir / "clan.state.json"
+        return channel_path(self.home, self.channel, "clan.state.json")
 
     @property
     def briefs_dir(self) -> Path:
-        return self.channel_dir / "briefs"
+        return channel_path(self.home, self.channel, "briefs")
 
     @property
     def plans_dir(self) -> Path:
-        return self.channel_dir / "plans"
+        return channel_path(self.home, self.channel, "plans")
 
     def harness_dir(self, role: str) -> Path:
-        return self.channel_dir / "harness" / role
+        validate_name(role, "role")
+        return channel_path(self.home, self.channel, "harness", role)
 
     def ensure(self) -> "ClanPaths":
         # files/ too: --add-dir of a not-yet-existing directory is dropped by
         # claude (measured), so every granted tree must exist before launch
-        for d in (self.briefs_dir, self.plans_dir, self.channel_dir / "harness",
-                  self.channel_dir / "files", self.clan_toml.parent):
+        for d in (self.briefs_dir, self.plans_dir, channel_path(self.home, self.channel, "harness"),
+                  channel_path(self.home, self.channel, "files"), self.clan_toml.parent):
             d.mkdir(parents=True, exist_ok=True)
         return self
 
@@ -266,7 +272,9 @@ class ClanConfig:
                 "checkout": self.checkout, "roles": {n: r.to_dict() for n, r in self.roles.items()}}
 
     def validate(self, models: dict[str, dict] | None = None) -> "ClanConfig":
+        validate_name(self.channel)
         for name, role in self.roles.items():
+            validate_name(name, "role")
             if extract_mentions("@" + name) != [name]:
                 raise ValueError(f"role name is not mentionable on the channel: {name!r}")
             if not role.model:
@@ -297,7 +305,7 @@ class ClanConfig:
         return next(r for r in self.roles.values() if r.writer)
 
     def write(self, paths: ClanPaths) -> Path:
-        paths.ensure().clan_toml.write_text(dump_toml(self.to_dict()))
+        atomic_write(paths.ensure().clan_toml, dump_toml(self.to_dict()))
         return paths.clan_toml
 
     @classmethod
@@ -311,12 +319,15 @@ def read_state(paths: ClanPaths) -> dict:
     if not p.exists():
         return {}
     try:
-        return json.loads(p.read_text() or "{}")
+        with p.open() as f:
+            fcntl.flock(f, fcntl.LOCK_SH)
+            doc = json.loads(f.read() or "{}")
+        return doc if isinstance(doc, dict) else {}
     except json.JSONDecodeError:
         return {}
 
 
-def update_state(paths: ClanPaths, mutate: Callable[[dict], Any]) -> dict:
+def update_state(paths: ClanPaths, mutate: Callable[[dict], Any], *, recovery: dict | None = None) -> dict:
     """Read-modify-write under flock, so `watch` and `up` can run at once."""
     paths.ensure().state_json.touch()
     with open(paths.state_json, "r+") as f:
@@ -326,12 +337,21 @@ def update_state(paths: ClanPaths, mutate: Callable[[dict], Any]) -> dict:
             try:
                 state = json.loads(raw) if raw.strip() else {}
             except json.JSONDecodeError:
-                state = {}
+                if recovery is None:
+                    raise ValueError("clan state contains invalid JSON") from None
+                state = dict(recovery)
+            if not isinstance(state, dict):
+                if recovery is None:
+                    raise ValueError("clan state must be a JSON object")
+                state = dict(recovery)
+            if recovery is not None:
+                state = {**recovery, **state}
             mutate(state)
             f.seek(0)
             f.truncate()
             json.dump(state, f, indent=2, sort_keys=True)
             f.flush()
+            os.fsync(f.fileno())
         finally:
             fcntl.flock(f, fcntl.LOCK_UN)
     return state

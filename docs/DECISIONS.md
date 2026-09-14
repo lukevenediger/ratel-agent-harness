@@ -439,7 +439,7 @@ is migrated by development or tests.
    through Bus. Acceptance: concurrent-process posting/cursor tests, reversed ULID order,
    large/escaped payload round trips, attachment collisions, migration repeatability/rollback,
    CLI/MCP/SSE integration, existing suite and lint. Runtime clan state moves in work item 4.
-2. **Storage and lifecycle safety — pending.** R5: shared path validation and containment,
+2. **Storage and lifecycle safety — implemented and verified.** R5: shared path validation and containment,
    including symlinks. R6: complete message/attachment/cursor validation with malformed-record
    diagnostics. R7: refuse dirty worktree pruning unless explicitly forced. Make proposal
    validation and approval insertion transactional, then make approved configuration application
@@ -454,8 +454,8 @@ is migrated by development or tests.
    mobile checks, and malicious content. Keep all resources same-origin.
 4. **Maintainable runtime and observability — pending.** R11: separate board networking,
    rendering and state; extract harness adapters and round supervision from lifecycle code.
-   R12: typed/versioned message and clan-state contracts; migrate machine-owned clan state and
-   approval application records to SQLite with recovery tests. R14: bounded stdout/stderr buffers,
+   R12: typed/versioned message and clan-state contracts; migrate machine-owned clan state to
+   SQLite alongside the approval application records, with recovery tests. R14: bounded stdout/stderr buffers,
    streamed opt-in full logs and useful failure excerpts. R16: `ratel doctor` for configuration,
    binaries, credential presence (never values), worktrees and storage. Acceptance: adapter
    contracts, failure-path tests, bounded-memory output tests and redaction tests.
@@ -509,3 +509,37 @@ Next implementation: work item 2 (shared path/field hardening, safe worktree pru
 approval recording). Basic channel/sender-name validation and timezone checks were included in
 work item 1, and README positioning was clarified, but these do not complete R5/R6 or R20.
 All other work items remain pending with their acceptance criteria above.
+
+
+**44. Recoverable approvals and storage safety (2026-09-14).** Work item 2 of Decision 42
+adds shared structural validation, malformed message/cursor counts (`ratel diagnostics`),
+and channel path checks that reject traversal and symlinks, including SQLite sidecars, clan
+configuration and generated harness files. Invalid cursor values replay rather than strand
+unread messages; advancement repairs them. The explicitly selected home remains trusted.
+These are filesystem correctness checks, not a sandbox against a same-UID process racing
+directory replacement.
+
+`clan down --prune-worktrees` preflights every recorded worktree before killing the session.
+Uncommitted tracked or untracked work requires `--force`; paths outside the clan's expected
+layout are refused even with force. Failed removal retains the state record for recovery.
+
+Board approval insertion and newest-orchestrator-proposal validation now share a SQLite
+write transaction. Identical retries return the original decision; conflicting edits require
+a new proposal. `clan approve` commits an application intent with resolved config and state
+before changing files. It atomically replaces clan.toml, fsyncs state under flock, and marks
+the intent complete. Pending intents block lifecycle reads and are replayed on the next
+approve invocation, including after an interrupted state write. Completed retries use the
+saved configuration without re-resolving changed presets. Schema 2 upgrades schema 1 on
+write; read-only clients can still inspect either version. Same-OS-user bus access remains
+the documented trust boundary; a sender name is not authentication.
+
+The operator explicitly approved stacking commits on one branch, overriding the original
+one-branch-per-item delivery convention: phase 1 is commit `3b67f2d` and phase 2 follows it
+on `issue-1`. No live channel migration, push, or deployment is part of these changes.
+
+Verification: `uv run --frozen pytest -q` — **727 passed, 6 deselected**, including the
+isolated real-Zellij/fake-agent integration suite. Added 43 regression cases covering
+symlink/traversal refusal, malformed nested records, cursor repair, read/wait parameter
+validation, schema upgrades, transactional proposal ordering, duplicate decisions, interrupted
+approval recovery, and dirty/redirected worktree pruning. Ruff and `git diff --check` pass.
+All test homes and repositories were temporary; live `~/.ratel` was untouched.

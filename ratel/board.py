@@ -30,6 +30,8 @@ from .clan.config import CATALOG_ERRORS, ClanConfig, ClanPaths, load_catalog, re
 from .clan.config import catalog as clan_catalog
 from .clan.proposal import validate_clan_attachment
 from .clan.session import ClanError, activity
+from .paths import channel_path, confined
+from .schema import validate_name
 from .ulid import is_ulid
 from .unfurl import unfurl
 
@@ -197,10 +199,23 @@ def _clan_signature(home: Path, ch: str) -> str:
 
 
 def list_channels(home: Path) -> list[str]:
-    root = home / "channels"
+    try:
+        root = confined(home, "channels")
+    except ValueError:
+        return []
     if not root.is_dir():
         return []
-    return sorted(p.name for p in root.iterdir() if ((p / "channel.sqlite3").is_file() or (p / "bus.jsonl").is_file()))
+    channels = []
+    for p in root.iterdir():
+        try:
+            validate_name(p.name)
+            if (channel_path(home, p.name, "channel.sqlite3").is_file()
+                    or channel_path(home, p.name, "bus.jsonl").is_file()):
+                channels.append(p.name)
+        except ValueError:
+            continue
+    return sorted(channels)
+
 
 
 class BoardHandler(BaseHTTPRequestHandler):
@@ -291,6 +306,9 @@ class BoardHandler(BaseHTTPRequestHandler):
         except (BrokenPipeError, ConnectionResetError):
             pass
 
+        except (ValueError, sqlite3.Error):
+            self._error(409, "channel storage unavailable")
+
     # -- write route (token-gated) ---------------------------------------
     def do_POST(self):
         try:
@@ -333,7 +351,7 @@ class BoardHandler(BaseHTTPRequestHandler):
         body = self.rfile.read(n)            # exactly n: HTTP/1.1 keeps the connection
         try:
             doc = json.loads(body)
-        except json.JSONDecodeError:
+        except (json.JSONDecodeError, UnicodeDecodeError):
             return self._error(400, "body must be JSON")
         if not isinstance(doc, dict):
             return self._error(400, "body must be a JSON object")
@@ -359,26 +377,12 @@ class BoardHandler(BaseHTTPRequestHandler):
             validate_clan_attachment(att, clan_catalog(self.home))
         except ValueError as e:
             return self._error(422, str(e))
-        # the page is not the guard: an approval must supersede the newest
-        # proposal on this channel, or a second tab (or curl) lands a stale
-        # clan.toml — same rule and wording as `clan approve`. Proposals
-        # are trusted only from the orchestrator (it runs `clan propose`);
-        # a role cannot kill the operator's Confirm with a rogue one.
         bus = Bus(self.home, ch)
-        proposed = [m["id"] for m in bus.read_all()
-                    for a in m.get("attachments") or []
-                    if m["from"] == "orchestrator"
-                    and isinstance(a, dict) and a.get("type") == "clan"
-                    and a.get("status") == "proposed"]
-        if not proposed:
-            return self._error(422, "no proposed clan proposal on the bus — "
-                                    "an approval must supersede the newest proposal")
-        newest = proposed[-1]
-        if att.get("supersedes") != newest:
-            return self._error(422, f"attachment supersedes {att.get('supersedes')!r} "
-                                    f"but the newest proposed clan message is {newest!r} — "
-                                    "approve the newest proposal")
-        msg = bus.post("stakeholder", text, parent=parent, attachments=[att])
+        try:
+            msg = bus.post("stakeholder", text, parent=parent, attachments=[att],
+                           expected_proposal=att.get("supersedes"))
+        except ValueError as e:
+            return self._error(409 if "already approved" in str(e) else 422, str(e))
         return self._json({"id": msg["id"]}, 201)
 
     def _channel_summaries(self) -> list[dict]:
@@ -493,8 +497,14 @@ class BoardHandler(BaseHTTPRequestHandler):
     def _file(self, ch: str, name: str):
         if not CHANNEL_RE.match(ch):
             return self._error(400, "bad channel")
-        files_dir = (self.home / "channels" / ch / "files").resolve()
-        target = (files_dir / name).resolve()
+        try:
+            validate_name(ch)
+            if any(ord(c) < 32 or ord(c) == 127 for c in name):
+                raise ValueError("bad filename")
+            files_dir = channel_path(self.home, ch, "files")
+            target = confined(files_dir, name)
+        except ValueError:
+            return self._error(403, "forbidden")
         if files_dir not in target.parents:
             return self._error(403, "forbidden")
         if not target.is_file():

@@ -125,3 +125,15 @@ def test_remove_worktree_is_forgiving_when_already_gone(repo, tmp_path):
     gitwt.remove_worktree(repo, wt)
     gitwt.remove_worktree(repo, wt)   # `clan down --prune-worktrees` runs twice happily
     assert not wt.exists()
+
+
+@pytest.mark.parametrize('filename', ['README.md', 'untracked.txt'])
+def test_remove_dirty_worktree_requires_explicit_force(repo, tmp_path, filename):
+    wt = tmp_path / 'wt' / 'dev'
+    gitwt.add_writer_worktree(repo, wt, 'issue-1')
+    (wt / filename).write_text('uncommitted work')
+    with pytest.raises(ValueError, match='uncommitted'):
+        gitwt.remove_worktree(repo, wt)
+    assert (wt / filename).read_text() == 'uncommitted work'
+    gitwt.remove_worktree(repo, wt, force=True)
+    assert not wt.exists()

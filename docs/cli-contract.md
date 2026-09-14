@@ -60,7 +60,7 @@ channel, zellij session and config all share one name.
 | `clan nudge <role>` | type one line into a role's pane (`text` optional; default is a mention of the newest message) | `{"role", "pane", "text"}` |
 | `clan checkpoint <role>` | reset a role's context: `/clear`/`/new` (default `--mode clear`; `--mode compact` types `/compact` on both) typed into an interactive pane with a re-orient nudge, or a `reset` marker for headless kinds; refuses a busy role (in `watch.pending` or `watch.nudged`) unless `--force`, exiting 1 with `{"role", "reason": "busy", "hint"}` on stderr; refuses `--mode clear` on the orchestrator outright (`"reason": "orchestrator is never cleared"`, no override — compact is allowed) and refuses a role checkpointing itself (`AGENT_NAME` equals the role, `"reason": "self-checkpoint"`) unless `--force` (Decision 38) | checkpoint record `{"role", "mode", "ts", "context_tokens", "reason"}` |
 | `clan sync <role>` | fast-forward a detached reviewer worktree to the branch tip | `{"role", "worktree", "head"}` |
-| `clan down` | kill the zellij session (`--prune-worktrees` also removes the worktrees it created) and kill any headless round that outlived its pane | `{"session", "worktrees_removed", "rounds_killed"}` |
+| `clan down` | kill the zellij session (`--prune-worktrees` removes its clean worktrees; add `--force` to discard uncommitted changes) and kill any headless round that outlived its pane | `{"session", "worktrees_removed", "rounds_killed"}` |
 
 Notes:
 
@@ -124,7 +124,7 @@ closed without reading the body, so a keep-alive client cannot desync.
 
 ## Storage and migration
 
-New channels use `channels/<channel>/channel.sqlite3`, schema version 1, on local disk.
+New channels use `channels/<channel>/channel.sqlite3`, schema version 2, on local disk.
 All database processes must run on the same host; remote board clients use HTTP. Do not put
 an active channel database on a network filesystem. SQLite connections use WAL and bounded
 lock waits; write failures are reported rather than acknowledged without persistence.
@@ -136,6 +136,7 @@ A cursor only advances; presence-only touches never reset it.
 
 | Command | Contract |
 |---|---|
+| `diagnostics --channel NAME` | Read-only counts of malformed messages and cursors; no AGENT_NAME required. |
 | `migrate --channel NAME` | Offline legacy import; prints one JSON report with message/cursor/skipped-line counts, database path and original-file retention. Refuses an existing database. No AGENT_NAME required. |
 | `export --channel NAME` | Prints JSONL messages in append order without consuming agent cursors. No AGENT_NAME required. |
 | `tail --channel NAME [--since ID]` | Replays history (or messages after ID), then follows committed messages as JSONL. Ctrl-C exits cleanly. No AGENT_NAME required. |
@@ -157,3 +158,15 @@ The SSE endpoint emits each message's public ID as `id:`. On reconnect, `Last-Ev
 takes precedence over the original `since` query parameter. Stream polling finishes its
 read transaction before writing to the browser or sleeping. The board still has exactly one
 write route; an unmigrated channel answers its approval POST with 409 and must be migrated first.
+
+Approval posting checks the newest orchestrator proposal and inserts the stakeholder decision
+in one transaction. An identical retry returns the original message id; a conflicting second
+decision returns 409 and requires a new proposal. `clan approve` records a durable application
+intent before saving config and state. If interrupted, rerun `clan approve` to finish applying
+the saved snapshot; lifecycle commands refuse a pending application. Completed retries are
+idempotent. This does not authenticate arbitrary bus writers sharing the same OS account.
+
+Channel and agent names use letters, digits, underscores, dots and hyphens, excluding
+`.` and `..`. Clan roles must also be valid mention names. Symlinks within channel storage (including SQLite sidecars) are refused. The
+operator-selected home may itself be a symlink. Malformed messages are skipped on reads and
+counted by `diagnostics`; an invalid cursor replays history and is repaired on advancement.

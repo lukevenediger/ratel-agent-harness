@@ -24,6 +24,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import TextIO
 
+from ..paths import confined
 from .config import ClanConfig, ClanPaths, RoleSpec, deep_merge, effort_word, load_models, update_state
 from .gitwt import exclude_in_worktree
 from .loop import NudgeLoop
@@ -108,17 +109,17 @@ def write_configs(paths: ClanPaths, cfg: ClanConfig, role: str,
     hd = paths.harness_dir(role)
     hd.mkdir(parents=True, exist_ok=True)
     env = _agent_env(paths, cfg, role)
-    brief = hd / "brief.md"
+    brief = confined(hd, "brief.md")
     brief.write_text(render_brief(cfg, role, worktree, unattended=unattended)
                      + f"\nChannel directory: {paths.channel_dir}"
                      + f"\nclan.toml: {paths.clan_toml}\n")
 
-    (hd / "mcp.json").write_text(json.dumps({"mcpServers": {"ratel": {
+    confined(hd, "mcp.json").write_text(json.dumps({"mcpServers": {"ratel": {
         "type": "stdio", "command": sys.executable,
         "args": ["-m", "ratel.mcp_server"], "env": env}}}, indent=2))
 
     inline = " ".join(f"{k}={shlex.quote(v)}" for k, v in env.items())
-    (hd / "settings.json").write_text(json.dumps({"hooks": {"UserPromptSubmit": [{"hooks": [
+    confined(hd, "settings.json").write_text(json.dumps({"hooks": {"UserPromptSubmit": [{"hooks": [
         {"type": "command",
          "command": f"{inline} {shlex.quote(sys.executable)} -m ratel.unread"}]}]}}, indent=2))
 
@@ -155,9 +156,9 @@ def write_configs(paths: ClanPaths, cfg: ClanConfig, role: str,
                             "external_directory": {"*": "deny", **{p: "allow" for p in allowed}}}
     else:
         oc["permission"] = {"external_directory": {p: "allow" for p in allowed}}
-    (hd / "opencode.json").write_text(json.dumps(oc, indent=2))
+    confined(hd, "opencode.json").write_text(json.dumps(oc, indent=2))
     if spec.playbook:
-        (hd / "playbook.toml").write_text(spec.playbook)
+        confined(hd, "playbook.toml").write_text(spec.playbook)
     return hd
 
 
@@ -570,8 +571,8 @@ def _run_headless(cfg: ClanConfig, role: str, hd: Path, channel_dir: Path,
     while being buffered for the rounds.jsonl record; CLAN_ROUND_TIMEOUT
     seconds (default 3600) kill a wedged round and the loop moves on.
     """
-    rounds_path = hd / "rounds.jsonl"
-    session_file = hd / "opencode-session"
+    rounds_path = confined(hd, "rounds.jsonl")
+    session_file = confined(hd, "opencode-session")
     timeout_s = float(os.environ.get("CLAN_ROUND_TIMEOUT") or DEFAULT_ROUND_TIMEOUT_S)
     state = {"n": 0, "session_id": session_file.read_text().strip()
              if session_file.exists() else None}
@@ -597,8 +598,8 @@ def _run_headless(cfg: ClanConfig, role: str, hd: Path, channel_dir: Path,
 
     def run_round(prompt: str) -> None:
         reset = False
-        if (hd / "reset").exists():          # `clan checkpoint` left a rewind marker
-            (hd / "reset").unlink()
+        if confined(hd, "reset").exists():          # `clan checkpoint` left a rewind marker
+            confined(hd, "reset").unlink()
             reset = True
             state["n"] = 0                   # this round launches as round 1: no --continue / -s
             state["session_id"] = None
@@ -639,7 +640,8 @@ def _run_headless(cfg: ClanConfig, role: str, hd: Path, channel_dir: Path,
             logged = list(argv)                     # prompt-free, wherever it sits
             logged.pop(argv.index(prompt))
             if "--append-system-prompt" in logged:  # the brief as its path, not its text
-                logged[logged.index("--append-system-prompt") + 1] = str(hd / "brief.md")
+                logged[logged.index("--append-system-prompt") + 1] = str(confined(hd, "brief.md"))
+            pid_file = confined(hd, "round.pid")
             p = subprocess.Popen(argv, env={**env, **extra}, stdin=subprocess.DEVNULL,
                                  stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
                                  start_new_session=True)
@@ -648,7 +650,7 @@ def _run_headless(cfg: ClanConfig, role: str, hd: Path, channel_dir: Path,
                 pgid = os.getpgid(p.pid)         # start_new_session: pgid == pid
             except ProcessLookupError:
                 pgid = p.pid
-            (hd / "round.pid").write_text(json.dumps(
+            pid_file.write_text(json.dumps(
                 {"pid": p.pid, "pgid": pgid, "started": _ps_lstart(p.pid)}))
             t_out = threading.Thread(
                 target=pump, args=(p.stdout, lambda line: (out_lines.append(line),
@@ -693,7 +695,7 @@ def _run_headless(cfg: ClanConfig, role: str, hd: Path, channel_dir: Path,
         if auth_hit.is_set() and not error:
             error = "the harness is not authenticated — run its login once as the operator"
         current.pop("pid", None)
-        (hd / "round.pid").unlink(missing_ok=True)
+        confined(hd, "round.pid").unlink(missing_ok=True)
         session_id = extract_opencode_session("".join(out_lines))
         if session_id:                           # opencode: resume THIS session, never a global -c
             state["session_id"] = session_id
@@ -710,4 +712,4 @@ def _run_headless(cfg: ClanConfig, role: str, hd: Path, channel_dir: Path,
             f.write(json.dumps(record) + "\n")
 
     run_round(default_prompt(cfg, role))     # the kickoff runs before the loop reads stdin
-    NudgeLoop(run_round, stdin=stdin, log=hd / "nudges.log").run()
+    NudgeLoop(run_round, stdin=stdin, log=confined(hd, "nudges.log")).run()
