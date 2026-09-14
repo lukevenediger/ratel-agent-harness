@@ -81,7 +81,7 @@ Notes:
 - `clan approve` trusts approvals only from the `stakeholder` bus name and
   proposals only from `orchestrator` (docs/DECISIONS.md, Decision 32);
   `--auto-approve` still posts the proposal on the bus — it approves it
-  in-process, so no approval message and no board round trip.
+  in-process after posting a stakeholder approval, with no board round trip.
 
 ## Board HTTP API
 
@@ -90,6 +90,8 @@ Request and error bodies are JSON; errors are `{"error": "<message>"}`.
 
 | Route | Returns |
 |---|---|
+| `GET /api/channels/{ch}/history?before=&limit=&q=&mention=&operator=` | Latest matching page in append order: `messages`, `next_before`, `tip`; initial pages also include proposal `heads`. Default 100, maximum 200; invalid parameters or unknown `before` return 400. |
+| `GET /api/channels/{ch}/pins` | Current `pins` and newest trusted proposal/approval `heads`, independent of the history window. |
 | `GET /api/clan/catalog` | the same object as `ratel clan catalog` — `presets` is what fills the clan card's one `setup` dropdown per role |
 | `GET /static/{name}` | a vendored asset from an allow-list dict (`mermaid.min.js` only); `immutable` + `nosniff` + `default-src 'none'`, gzip when `Accept-Encoding` allows. Anything else, including `board.html`, is `404` |
 | `POST /api/channels/{ch}/post` | `201 {"id": "<bus msg id>"}` — posts one message as `stakeholder` |
@@ -170,3 +172,16 @@ Channel and agent names use letters, digits, underscores, dots and hyphens, excl
 `.` and `..`. Clan roles must also be valid mention names. Symlinks within channel storage (including SQLite sidecars) are refused. The
 operator-selected home may itself be a symlink. Malformed messages are skipped on reads and
 counted by `diagnostics`; an invalid cursor replays history and is repaired on advancement.
+
+History search (`q`, at most 200 characters) is a literal, case-insensitive match in message
+text, including replies. `mention` matches an exact mention; `operator=1` selects posts by
+or mentioning `stakeholder`. Filters combine with AND. `before` is an exclusive public
+message ID resolved to append sequence; a null `next_before` means no older matches.
+`tip` is the snapshot's last valid message, even when a filter matches nothing. The board
+connects SSE from that tip so arrivals between the fetch and connection are replayed.
+Unfiltered agent-facing `/messages?since=&limit=` semantics are unchanged.
+
+Board links retain the original `#channel` form and add optional hash parameters:
+`#channel?thread=ID&q=search&mention=agent&operator=1`. Browser Back/Forward restores this
+view. Token query parameters are removed before saving navigation history and are never
+included in Channel link or Thread link. Missing channels/threads show recoverable errors.

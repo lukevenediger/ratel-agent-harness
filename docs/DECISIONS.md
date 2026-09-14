@@ -446,7 +446,7 @@ is migrated by development or tests.
    recoverable and idempotent. Acceptance: traversal/hostile-record/dirty-worktree tests and
    competing proposal/approval tests. Preserve the documented operator/agent boundary; SQLite
    alone does not authenticate a bus sender.
-3. **Board correctness and navigation — pending.** R8: cancellation and generation checks for
+3. **Board correctness and navigation — implemented and verified.** R8: cancellation and generation checks for
    channel/thread requests and stale streams. R9: loading, connection, reconnect and retry UI.
    R10: search, mention/operator filters and channel/thread permalinks. R13: bounded history
    pages with incremental loading, without losing pinned or threaded context. Acceptance:
@@ -543,3 +543,36 @@ symlink/traversal refusal, malformed nested records, cursor repair, read/wait pa
 validation, schema upgrades, transactional proposal ordering, duplicate decisions, interrupted
 approval recovery, and dirty/redirected worktree pruning. Ruff and `git diff --check` pass.
 All test homes and repositories were temporary; live `~/.ratel` was untouched.
+
+
+**45. Bounded board history and navigation (2026-09-14).** Work item 3 of Decision 42
+adds latest-first history selection (rendered chronologically), older-page loading by exclusive
+append cursor, full-channel literal text search, mention/operator filters and channel/thread
+links with Back/Forward restoration. Replies are timeline entries that open the parent thread,
+so a page or search containing replies never hides the only matching context. Pins and proposal
+heads load independently; an older pinned proposal retains its editing controls. Initial history
+includes proposal heads before cards render and a snapshot tip for gap-free SSE startup.
+
+Channel requests, page loads, pins, clan measurements, threads and EventSource callbacks are
+protected by cancellation and generation checks. Closing a thread invalidates its pending
+request. Loading, failure, reconnect and retry states are visible. Approval network failures
+retain the card for retry and duplicate clicks are suppressed while confirmation is pending.
+SQLite channel summaries no longer load complete histories. Sparse searches can still scan
+records; there is no FTS index, and legacy JSONL browsing remains a full-file compatibility path.
+Page size is bounded (100 default, 200 maximum); explicitly loaded pages/live arrivals grow the
+DOM. Virtualization and the larger UI module split remain future work. All assets remain same-origin.
+
+Browser regression coverage uses real Chromium with deliberately delayed responses that ignore
+AbortSignal, queued events from closed streams, failed requests, replay duplicates, search and
+filters, Back/Forward, deep-link reloads, keyboard controls, a 390px viewport, inert hostile text,
+older pinned approvals and real CLI-to-browser SSE delivery. Playwright is an optional Node test
+runtime, documented in README; the test explicitly skips if it is absent. Manual agent-browser
+desktop/mobile inspection used synthetic data in a temporary home. Commits remain on `issue-1`.
+
+Verification: full `uv run --frozen pytest -q --tb=short` with the available Playwright
+Node runtime exposed through `NODE_PATH` — **739 passed, 6 deselected**, including Chromium
+and isolated real-Zellij/fake-agent integration tests. The final same-channel stale-error
+guard was then verified by rerunning the expanded Chromium suite (**1 passed**). Ruff,
+JavaScript syntax checking and `git diff --check` pass. The temporary preview server and
+isolated agent-browser session were stopped after visual verification. No live home was used.
+Work item 4 (runtime structure, state storage and observability) remains next.

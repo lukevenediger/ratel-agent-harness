@@ -356,14 +356,14 @@ def test_channels_are_ordered_by_last_message_not_name(home, srv):
     assert chans[1]["last_id"] is not None and chans[2]["last_id"] is None
 
 
-def test_channel_summary_reads_each_bus_once(home, srv, monkeypatch):
-    """The last id comes from the same pass that counts: no second full read of
-    bus.jsonl just to find the ordering key."""
+def test_channel_summary_avoids_loading_history(home, srv, monkeypatch):
+    """SQLite summaries count and read the tip without loading every message."""
     Bus(home, "a").post("o", "one")
     Bus(home, "b").post("o", "two")
     calls = []
-    real = ratel.board.Bus.read_all
-    monkeypatch.setattr(ratel.board.Bus, "read_all",
+    monkeypatch.setattr(ratel.board.Bus, "read_all", lambda self: pytest.fail("full history read"))
+    real = ratel.board.Bus.summary
+    monkeypatch.setattr(ratel.board.Bus, "summary",
                         lambda self: (calls.append(self.channel), real(self))[1])
     assert json.loads(get(srv, "/api/channels")[2])["channels"]
     assert sorted(calls) == ["a", "b"]
@@ -739,9 +739,9 @@ def test_board_html_paints_the_active_row_before_the_fetch(srv):
     channel's body has already swapped in."""
     body = get(srv, "/")[2].decode()
     sel = body[body.index("async function selectChannel("):]
-    head = sel[:sel.index("const d = await fetch")]     # before the first await
-    assert "location.hash = ch;" in head and "renderChannels();" in head
-    assert "renderChannels();" in sel[sel.index("const d = await fetch"):]  # resync kept
+    head = sel[:sel.index("const d = await fetchJSON")]     # before the first await
+    assert "saveRoute(route.thread);" in head and "renderChannels();" in head
+    assert "renderChannels();" in sel[sel.index("const d = await fetchJSON"):]  # resync kept
 
 
 def test_board_html_renders_idle_interactive_as_quiet(srv):
@@ -1502,3 +1502,18 @@ def test_a_real_exception_is_still_reported(home, capsys):
     out = _handle_error_output(server, ValueError("a real bug"), capsys)
     assert "a real bug" in (out.err + out.out)
     server.server_close()
+
+
+def test_history_route_bounds_filters_and_separate_pins(home, srv):
+    bus = Bus(home, 'history')
+    old = bus.post('agent', 'find me @stakeholder', pin=True)
+    for i in range(105):
+        bus.post('agent', str(i))
+    page = json.loads(get(srv, '/api/channels/history/history')[2])
+    assert len(page['messages']) == 100 and page['next_before']
+    assert json.loads(get(srv, '/api/channels/history/history?q=find&operator=1')[2])['messages'] == [old]
+    assert json.loads(get(srv, '/api/channels/history/pins')[2])['pins'] == [old]
+    for query in ('limit=201', 'limit=bad', 'before=bad', 'operator=yes'):
+        with pytest.raises(HTTPError) as err:
+            get(srv, '/api/channels/history/history?' + query)
+        assert err.value.code == 400

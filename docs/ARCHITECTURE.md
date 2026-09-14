@@ -170,8 +170,10 @@ token-gated write route (the clan-approval POST — the request contract lives i
 | Route | Returns |
 |---|---|
 | `GET /` | `board.html` (with frame-busting CSP / `X-Frame-Options` / `Referrer-Policy` headers — the page holds the write token) |
-| `GET /api/channels` | Every channel with presence and message count (parses each bus in full — call on load and switch, never on a timer) |
-| `GET /api/channels/{ch}/messages?since=&limit=` | Messages and the current pins |
+| `GET /api/channels` | Every channel with presence, stored-message count and tip (SQLite summary queries; legacy JSONL scans) |
+| `GET /api/channels/{ch}/messages?since=&limit=` | Messages and the current pins (agent-compatible API) |
+| `GET /api/channels/{ch}/history?before=&limit=&q=&mention=&operator=` | Latest matching page, exclusive older-page cursor and snapshot tip; default 100, maximum 200 |
+| `GET /api/channels/{ch}/pins` | Pins plus trusted proposal/approval heads, independently of loaded history |
 | `GET /api/channels/{ch}/thread/{id}` | Parent and replies |
 | `GET /api/channels/{ch}/events?since=` | SSE: `hello` (presence), then `message` per committed message (with SSE `id`, honoring `Last-Event-ID` on reconnect), `presence` every 10 s, `: ping` every 15 s. With `since`, replays messages after that id before tailing — this closes the race between the initial fetch and the stream connect |
 | `GET /api/channels/{ch}/unfurl?url=` | GitHub PR/issue or Google Doc card data, cached 300 s (30 s for failures) |
@@ -310,3 +312,22 @@ under flock with fsync, then marks the intent complete. Lifecycle readers refuse
 `clan approve` recovers them before processing another decision. Runtime state remains JSON until work item 4;
 clan.toml remains operator-editable. This protocol provides retry recovery across the two files.
 Version 1 channels remain readable and upgrade transactionally when opened for writing.
+
+### Board navigation and request lifetime
+
+A channel selection owns an AbortController and generation number. Initial history, older
+pages, pin and clan refreshes check that generation before changing the view; repeated pin
+and clan requests also have their own counters. Threads own a separate controller/counter
+so closing or switching a thread invalidates pending responses. SSE callbacks additionally
+check the specific EventSource instance, including after manual retry. Connection state
+and fetch failures are visible, with retry actions.
+
+The initial page contains the latest 100 matching messages in append order. Search and
+mention/operator filters run over the full channel history on the server; search is literal
+message text, not an FTS index. SQLite scans candidates backwards and stops after a page
+plus one valid match, bounding materialized results. Sparse searches and proposal-head queries
+can scan farther; legacy JSONL still requires a full file read. Pin and thread reads preserve
+context outside the current window. Replies appear in the timeline and open their parent
+thread. Loading older history prepends rows while preserving the current scroll anchor and
+SSE cursor. DOM size grows only with explicitly loaded pages and live arrivals; there is no
+virtualization or eviction in this phase.

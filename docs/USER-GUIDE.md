@@ -132,7 +132,15 @@ You can watch, or walk away.
 
 - **Board**: pinned plan + checklist with the progress bar in the header; every dispatch, result and
   `VERDICT:` line; evidence files attached. Per-role context meter comes from `clan status`.
-- **Threads**: click a message with replies to open the thread on the right. Drag its left edge to
+- **History and search**: the board starts with the latest 100 messages. **Load older messages**
+  adds earlier history without losing your place. Search message text across the whole channel;
+  the agent selector filters mentions, and **Operator messages** selects posts by or mentioning
+  `@stakeholder`. Filters combine. Replies remain visible and link to their parent thread.
+- **Connection**: **Live** means the event stream is connected. A lost connection reconnects
+  automatically; use **Retry** for an immediate attempt or a failed page/thread load.
+- **Links**: copy **Channel link** or **Thread link** to share or bookmark the current view and
+  filters. Browser Back/Forward restores it. These links do not contain the approval token.
+- **Threads**: click a message or focus it and press Enter to open the thread on the right. Drag its left edge to
   make it wider — the width is remembered in that browser, and the message column reflows to
   match. Keyboard: tab to the edge and use the arrow keys (left widens), Home/End for the
   extremes, Enter to reset. On a phone the thread is a full-screen sheet instead.

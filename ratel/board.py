@@ -287,6 +287,17 @@ class BoardHandler(BaseHTTPRequestHandler):
                 bus = self._bus(parts[2])
                 if bus is None:
                     return self._error(404, "no such channel")
+                if parts[3] == "history" and len(parts) == 4:
+                    try:
+                        if q.get("operator", "0") not in ("0", "1"):
+                            raise ValueError("operator must be 0 or 1")
+                        return self._json(bus.history(q.get("before"), int(q.get("limit", "100")),
+                                                      q.get("q", ""), q.get("mention", ""),
+                                                      q.get("operator") == "1"))
+                    except ValueError as e:
+                        return self._error(400, str(e))
+                if parts[3] == "pins" and len(parts) == 4:
+                    return self._json({"pins": bus.pins(), "heads": bus.clan_heads()})
                 if parts[3] == "messages" and len(parts) == 4:
                     raw_limit = q.get("limit", "")
                     limit = int(raw_limit) if raw_limit.isdigit() and int(raw_limit) > 0 else None
@@ -412,11 +423,8 @@ class BoardHandler(BaseHTTPRequestHandler):
         `checkout` is only ever rendered as text. A channel with no clan (or a
         broken one) keeps its row with null metadata."""
         bus = Bus(self.home, ch, read_only=True)   # a GET must not touch the bus mtime
-        msgs = bus.read_all()                 # one pass: the count and the ordering key
-        # read_all's contract gives every message a dict and a str id, so the
-        # last line is safe to index and last_id is a str; `ts` is not part of
-        # that contract, so it keeps its own check.
-        last = msgs[-1] if msgs else {}
+        summary = bus.summary()
+        last = summary['last']
         last_id = last.get("id")
         last_ts = last.get("ts") if isinstance(last.get("ts"), str) else None
         cfg = self._clan_config(ch)
@@ -429,7 +437,7 @@ class BoardHandler(BaseHTTPRequestHandler):
             repo, issue = _safe_repo(cfg.repo), cfg.issue
             checkout = state.get("checkout") or cfg.checkout
             created = state.get("created")
-        return {"name": ch, "agents": bus.presence(), "count": len(msgs),
+        return {"name": ch, "agents": bus.presence(), "count": summary["count"],
                 "last_id": last_id, "last_ts": last_ts,
                 "repo": repo, "issue": issue, "checkout": checkout, "created": created}
 

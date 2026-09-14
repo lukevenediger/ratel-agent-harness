@@ -668,7 +668,7 @@
     * { animation: none !important; transition: none !important; }
   }
 
-  /* ---- clan card ---------------------------------------------------------- */
+/* ---- clan card ---------------------------------------------------------- */
   /* the WRAPPER is the scroll container, never the table: `display: block` on a
      table kills table layout, and then no percentage or elastic column width
      has anything to resolve against. Do not move the overflow back. Shared
@@ -736,6 +736,18 @@
     .clancard .clanadd .clanin { flex: 1 1 100%; }
     .clancard .confirm { width: 100%; }
   }
+  #browse { display:flex; flex-wrap:wrap; gap:10px; align-items:center; padding:12px 20px; }
+  #browse input[type=search] { flex:1; min-width:160px; width:100%; max-width:480px; }
+  #browse input[type=search], #browse button, #olderMessages, .retry-action {
+    background:var(--bg-field); color:var(--text-primary); border:1px solid var(--outline);
+    border-radius:5px; padding:10px; min-height:44px; font:inherit;
+  }
+  #browse label { display:flex; align-items:center; gap:6px; min-height:44px; }
+  #connection, #historyControls { padding:6px 20px; color:var(--text-muted); font-size:13px; }
+  #connection button { margin-left:12px; }
+  #historyControls { display:flex; align-items:center; gap:12px; }
+  .thread-link { color:var(--accent); margin-left:auto; }
+  @media(max-width:700px) { #browse { padding:10px 12px; } #browse input[type=search] { flex-basis:100%; max-width:none; } }
 </style>
 
 <div id="shell">
@@ -760,6 +772,14 @@
       <div id="clanMeter" hidden aria-label="Context usage per role"></div>
       <select id="filter" aria-label="Filter by agent"><option value="">everyone</option></select>
     </header>
+    <form id="browse" role="search">
+      <input id="search" type="search" maxlength="200" placeholder="Search message text" aria-label="Search message text">
+      <label><input id="operatorOnly" type="checkbox"> Operator messages</label>
+      <button type="submit">Search</button>
+      <a id="channelLink" href="#">Channel link</a>
+    </form>
+    <div id="connection" role="status" aria-live="polite"></div>
+    <div id="historyControls"><button id="olderMessages" hidden>Load older messages</button><span id="historyStatus" role="status"></span></div>
     <section id="pins" aria-label="Pinned messages"></section>
     <main id="messages"></main>
   </div>
@@ -810,7 +830,69 @@ const elClanMeter = $("#clanMeter");
 const S = { channel: null, es: null, seen: new Set(), last: "", lastDay: "",
             byId: new Map(), kids: new Map(), agents: new Set(), openThread: null,
             token: null, catalog: null, newestProposal: {}, approvedProposal: {},
-            channels: [], clan: null };
+            channels: [], clan: null, generation: 0, controller: null, threadController: null,
+            threadGeneration: 0, nextBefore: null, paging: false, filters: {}, pinGeneration: 0,
+            clanGeneration: 0 };
+
+  const elSearch = $("#search"), elOperator = $("#operatorOnly"), elOlder = $("#olderMessages");
+function routeHash(channel, thread=null) {
+  const q = new URLSearchParams();
+  if (thread) q.set("thread", thread);
+  if (S.filters.query) q.set("q", S.filters.query);
+  if (S.filters.mention) q.set("mention", S.filters.mention);
+  if (S.filters.operator) q.set("operator", "1");
+  return "#" + encodeURIComponent(channel) + (q.size ? "?" + q : "");
+}
+function saveRoute(thread=null) {
+  if (!S.channel) return;
+  const hash = routeHash(S.channel, thread);
+  if (location.hash !== hash) history.pushState(null, "", hash);
+  $("#channelLink").href = routeHash(S.channel);
+}
+function readRoute() {
+  const [channel, query=""] = location.hash.slice(1).split("?");
+  let name;
+  try { name = decodeURIComponent(channel); } catch { name = ""; }
+  const q = new URLSearchParams(query);
+  return {channel:name, thread:q.get("thread"), query:q.get("q") || "",
+          mention:q.get("mention") || "", operator:q.get("operator") === "1"};
+}
+async function fetchJSON(path, signal) {
+  const response = await fetch(path, {signal});
+  if (!response.ok) throw new Error("HTTP " + response.status);
+  return response.json();
+}
+function connectionStatus(text, retry) {
+  const box = $("#connection");
+  box.textContent = text;
+  if (retry) {
+    const button = document.createElement("button");
+    button.className = "retry-action"; button.textContent = "Retry";
+    button.onclick = retry; box.appendChild(button);
+  }
+}
+function matchesView(m) {
+  const f = S.filters;
+  return (!f.query || m.text.toLocaleLowerCase().includes(f.query.toLocaleLowerCase())) &&
+    (!f.mention || (m.mentions || []).includes(f.mention)) &&
+    (!f.operator || m.from === "stakeholder" || (m.mentions || []).includes("stakeholder"));
+}
+function historyURL(before) {
+  const q = new URLSearchParams({limit:"100", q:S.filters.query || "", mention:S.filters.mention || "",
+                                operator:S.filters.operator ? "1" : "0"});
+  if (before) q.set("before", before);
+  return "/api/channels/" + encodeURIComponent(S.channel) + "/history?" + q;
+}
+function submitFilters(e) {
+  if (e) e.preventDefault();
+  selectChannel(S.channel, {query:elSearch.value.trim(), mention:elFilter.value, operator:elOperator.checked});
+}
+$("#browse").addEventListener("submit", submitFilters);
+elOperator.addEventListener("change", submitFilters);
+window.addEventListener("hashchange", () => {
+  const r = readRoute();
+  if (r.channel) selectChannel(r.channel, r);
+});
 
 /* ---- clan card ------------------------------------------------------ */
 const TOKEN_KEY = "ratel.board.token";
@@ -896,6 +978,7 @@ function clanHeadText(card, status) {
   if ((card.dataset.author || "") !== trusted)
     return status + " \u00b7 ignored (not from " + trusted + ")";
   if (status !== "proposed") return "\u2713 " + status;
+  if (card.dataset.msg === S.approvedProposal[S.channel]) return "✓ approved";
   return clanIsNewest(card) ? "proposed" : "superseded";
 }
 
@@ -907,7 +990,7 @@ function refreshClanHeads() {
     card.querySelector(".clanhead").textContent = clanHeadText(card, "proposed");
     card.querySelectorAll(".clanin").forEach(i => { i.disabled = !editable; });
     const btn = card.querySelector(".confirm");
-    if (btn) btn.disabled = !editable;
+    if (btn) btn.disabled = !editable || !!card._confirming;
     if (card._syncAdd) card._syncAdd();   // the blanket .clanin toggle ignores the roles cap
     // ...and it knows nothing about the edits either: re-enabling Confirm on
     // every arriving message would undo a live validation failure (drop the
@@ -1361,7 +1444,7 @@ function clanRevalidate(card) {
     const bad = clanValidate(card._att, catalog);
     card.querySelector(".clanerr").textContent = bad || "";
     const btn = card.querySelector(".confirm");
-    if (btn) btn.disabled = !!(bad || !clanEditable(card));
+    if (btn) btn.disabled = !!(bad || !clanEditable(card) || card._confirming);
   }).catch(() => {
     card.querySelector(".clanerr").textContent =
       "catalog unreadable — check models.toml, presets.toml and roles.toml in RATEL_HOME";
@@ -1473,26 +1556,39 @@ function clanCardInner(att, channel, m, card, author) {
     btn.textContent = "Confirm";
     btn.disabled = !S.token;
     btn.addEventListener("click", async () => {
-      const catalog = await clanCatalog().catch(() => null);
-      const approvedAtt = { type: "clan", status: "approved", issue: att.issue,
-                            roles: card._att.roles, supersedes: m ? m.id : "" };
-      const bad = clanValidate(approvedAtt, catalog);
-      if (bad) { err.textContent = bad; return; }
-      const r = await fetch("/api/channels/" + encodeURIComponent(channel) + "/post", {
-        method: "POST",
-        headers: Object.assign({ "Content-Type": "application/json" }, authHeaders()),
-        body: JSON.stringify({ text: "@orchestrator clan approved",
-                               parent: m ? m.id : null, attachments: [approvedAtt] })
-      });
-      if (r.status === 201) {
-        card.dataset.status = "approved";
-        card.replaceChildren(clanCardInner(approvedAtt, channel, m, card, "stakeholder"));
-      } else if (r.status === 401) {
-        storeToken(null);
-        hint.textContent = "token cleared \u2014 open the board with the token URL to confirm";
-      } else {
-        const b = await r.json().catch(() => ({}));
-        err.textContent = b.error || "error " + r.status;
+      if (card._confirming) return;
+      card._confirming = true;
+      const generation = S.generation;
+      btn.disabled = true;
+      try {
+        const catalog = await clanCatalog().catch(() => null);
+        if (generation !== S.generation || !card.isConnected) return;
+        const approvedAtt = { type: "clan", status: "approved", issue: att.issue,
+                              roles: card._att.roles, supersedes: m ? m.id : "" };
+        const bad = clanValidate(approvedAtt, catalog);
+        if (bad) { err.textContent = bad; return; }
+        const r = await fetch("/api/channels/" + encodeURIComponent(channel) + "/post", {
+          method: "POST",
+          headers: Object.assign({ "Content-Type": "application/json" }, authHeaders()),
+          body: JSON.stringify({ text: "@orchestrator clan approved",
+                                 parent: m ? m.id : null, attachments: [approvedAtt] })
+        });
+        if (generation !== S.generation || !card.isConnected) return;
+        if (r.status === 201) {
+          card.dataset.status = "approved";
+          card.replaceChildren(clanCardInner(approvedAtt, channel, m, card, "stakeholder"));
+        } else if (r.status === 401) {
+          storeToken(null);
+          hint.textContent = "token cleared — open the board with the token URL to confirm";
+        } else {
+          const b = await r.json().catch(() => ({}));
+          hint.textContent = b.error || "error " + r.status;
+        }
+      } catch {
+        if (card.isConnected) hint.textContent = "Could not confirm. Check your connection and try again.";
+      } finally {
+        card._confirming = false;
+        if (card.isConnected) clanRevalidate(card);
       }
     });
     root.appendChild(btn);
@@ -1797,9 +1893,13 @@ function messageNode(m, interactive) {
   const atts = el.querySelector(".atts");
   for (const a of m.attachments || []) atts.appendChild(renderAttachment(a, S.channel, m));
   if (interactive) {
-    const open = e => { if (!e.target.closest(".atts")) openThread(m.id); };
+    const open = e => { if (!e.target.closest(".atts, a, button")) openThread(m.parent || m.id); };
+    el.setAttribute("tabindex", "0");
+    el.setAttribute("role", "button");
+    el.setAttribute("aria-label", "Open thread from " + m.from);
     el.addEventListener("click", open);
     el.addEventListener("keydown", e => {
+      if (e.target !== el) return;
       if (e.key === "Enter" || e.key === " ") { e.preventDefault(); open(e); }
     });
   }
@@ -1809,25 +1909,10 @@ function messageNode(m, interactive) {
 function paintFoot(id) {
   const el = elMessages.querySelector('.msg[data-id="' + id + '"]');
   if (!el) return;
-  const kids = S.kids.get(id) || [];
+  const m = S.byId.get(id);
   const foot = el.querySelector(".foot");
-  el.classList.toggle("has-replies", kids.length > 0);
-  if (kids.length) {
-    el.setAttribute("role", "button");
-    el.setAttribute("tabindex", "0");
-    el.setAttribute("aria-label", "Open thread, " + kids.length + (kids.length === 1 ? " reply" : " replies"));
-  } else {
-    el.removeAttribute("role");
-    el.removeAttribute("tabindex");
-    el.removeAttribute("aria-label");
-  }
-  if (!kids.length) { foot.innerHTML = ""; return; }
-  const who = [...new Set(kids.map(k => k.from))];
-  foot.innerHTML = "<span>&#8627; " + kids.length + (kids.length === 1 ? " reply" : " replies") + "</span>" +
-    who.map(n => {
-      const alt = isAltCycle(n) ? " alt" : "";
-      return '<span class="dot' + alt + '" style="color:' + colour(n) + '" title="' + esc(n) + '"></span>';
-    }).join("");
+  foot.textContent = m && m.parent ? "↳ Reply · View thread" : "View thread";
+  el.classList.add("has-replies");
 }
 
 // Header progress: the newest pin carrying a `tasks` attachment (issue #3). It is
@@ -1902,7 +1987,9 @@ function renderPins(pins) {
     const list = document.createElement("div");
     list.hidden = true;
     for (const p of older) {
-      const line = document.createElement("div");
+      const line = document.createElement("button");
+      line.type = "button";
+      line.addEventListener("click", () => openThread(p.parent || p.id));
       line.className = "pin collapsed";
       line.dataset.id = p.id;
       line.textContent = p.from + ": " + p.text.replace(/\s+/g, " ");
@@ -1917,7 +2004,7 @@ function renderPins(pins) {
   }
   const box = document.createElement("div");
   box.className = "pin expanded";
-  const node = messageNode(latest, false);
+  const node = messageNode(latest, true);
   node.style.borderLeftColor = colour(latest.from);
   if (isAltCycle(latest.from)) node.classList.add("alt");
   box.appendChild(node);
@@ -1953,7 +2040,7 @@ function applyFilter() {
   let visible = 0;
   for (const el of elMessages.querySelectorAll(".msg")) {
     const m = S.byId.get(el.dataset.id);
-    const show = !who || Boolean(m && (m.mentions || []).includes(who));
+    const show = Boolean(m && matchesView(m));
     el.hidden = !show;
     if (show) visible++;
   }
@@ -1967,25 +2054,25 @@ function applyFilter() {
     sep.hidden = !any;
   }
   let empty = elMessages.querySelector(".empty-row.filter");
-  if (who && !visible) {
+  if (!visible && (who || S.filters.query || S.filters.operator)) {
     if (!empty) {
       empty = document.createElement("div");
       empty.className = "empty-row filter";
       elMessages.appendChild(empty);
     }
-    empty.textContent = "No messages mention @" + who;
+    empty.textContent = "No matching messages. Try another search or filter.";
   } else if (empty) {
     empty.remove();
   }
 }
-elFilter.addEventListener("change", applyFilter);
+elFilter.addEventListener("change", submitFilters);
 
 /* ---- ingest -------------------------------------------------------- */
-function ingest(m, live) {
+function ingest(m, live, historic=false) {
   if (S.seen.has(m.id)) return false;   // the stream replays from `since`; render each id once
   S.seen.add(m.id);
   S.byId.set(m.id, m);
-  for (const a of m.attachments || []) {          // clan state, incl. thread replies
+  for (const a of historic ? [] : m.attachments || []) {          // clan state, incl. thread replies
     if (inferType(a) !== "clan") continue;
     if (a.status === "proposed" && m.from === "orchestrator")
       S.newestProposal[S.channel] = m.id;
@@ -1995,7 +2082,7 @@ function ingest(m, live) {
       S.approvedProposal[S.channel] = a.supersedes;
     refreshClanHeads();
   }
-  S.last = m.id;                         // append order, independent of ULID sorting
+  if (!historic) S.last = m.id;                         // append order, independent of ULID sorting
   noteAgents(m);
   if (live) bumpChannel(m);              // a live message is activity, reply or not
   if (m.parent) {
@@ -2004,10 +2091,10 @@ function ingest(m, live) {
     paintFoot(m.parent);
     if (S.openThread === m.parent) {
       const box = elThread.querySelector(".replies");
-      if (box) box.appendChild(messageNode(m, false));
+      if (box && !box.querySelector('[data-id="' + m.id + '"]')) box.appendChild(messageNode(m, false));
     }
-    return true;
   }
+  if (live && !matchesView(m)) return true;
   const nearBottom = window.innerHeight + window.scrollY >= document.body.offsetHeight - 80;
   const day = new Date(m.ts).toDateString();
   const el = messageNode(m, true);
@@ -2016,6 +2103,7 @@ function ingest(m, live) {
     elMessages.appendChild(dateSeparator(m.ts));
   }
   elMessages.appendChild(el);
+  paintFoot(m.id);
   hideEmptyRows();
   applyFilter();
   if (live) {
@@ -2031,6 +2119,7 @@ function ingest(m, live) {
 // the marked row has been >=90% in view for 2s (or a newer divider replaces it).
 let newObserver = null;
 function markNew(el) {
+  const generation = S.generation;
   const prev = elMessages.querySelector(".new-divider");
   if (prev) prev.remove();
   if (newObserver) { newObserver.disconnect(); newObserver = null; }
@@ -2043,6 +2132,7 @@ function markNew(el) {
     for (const en of entries) {
       if (en.intersectionRatio >= 0.9) {
         if (!timer) timer = setTimeout(() => {
+          if (generation !== S.generation) return;
           div.remove();
           if (newObserver) { newObserver.disconnect(); newObserver = null; }
         }, 2000);
@@ -2140,8 +2230,31 @@ if (elThreadResize) {
 
 /* ---- thread panel -------------------------------------------------- */
 async function openThread(id) {
-  const t = await fetch("/api/channels/" + S.channel + "/thread/" + id).then(r => r.ok ? r.json() : null);
-  if (!t) return;
+  if (!/^[0-9A-HJKMNP-TV-Z]{26}$/.test(id)) return;
+  if (S.threadController) S.threadController.abort();
+  const controller = S.threadController = new AbortController();
+  const generation = S.generation, request = ++S.threadGeneration, channel = S.channel;
+  S.openThread = id;
+  saveRoute(id);
+  elThread.hidden = false;
+  document.body.classList.add("thread-open");
+  elThread.textContent = "Loading thread…";
+  const cancel = document.createElement("button"); cancel.textContent = "Close thread";
+  cancel.onclick = closeThread; elThread.appendChild(cancel);
+  const current = () => generation === S.generation && request === S.threadGeneration;
+  let t;
+  try {
+    t = await fetchJSON("/api/channels/" + encodeURIComponent(channel) + "/thread/" + id, controller.signal);
+  } catch (error) {
+    if (!current() || error.name === "AbortError") return;
+    elThread.textContent = "Could not load this thread. ";
+    const retry = document.createElement("button"); retry.textContent = "Retry";
+    retry.onclick = () => openThread(id); elThread.append(retry, cancel); return;
+  }
+  if (!current()) return;
+  const repliesById = new Map(t.replies.map(m => [m.id, m]));
+  for (const m of S.kids.get(id) || []) repliesById.set(m.id, m);
+  t.replies = [...repliesById.values()];
   S.openThread = id;
   elThread.innerHTML = "";
   const bar = document.createElement("div");
@@ -2160,7 +2273,9 @@ async function openThread(id) {
   close.textContent = "\u00d7";
   close.setAttribute("aria-label", "Close thread");
   close.addEventListener("click", closeThread);
-  bar.append(back, title, close);
+  const link = document.createElement("a"); link.textContent = "Thread link";
+  link.className = "thread-link"; link.href = routeHash(channel, id);
+  bar.append(back, title, link, close);
 
   const plabel = document.createElement("div");
   plabel.className = "parent-label";
@@ -2182,7 +2297,10 @@ async function openThread(id) {
   (matchMedia("(max-width: 700px)").matches ? back : close).focus();
 }
 let sheetLock = null;
-function closeThread() {
+function closeThread(updateRoute=true) {
+  if (S.threadController) S.threadController.abort();
+  S.threadGeneration++;
+  if (updateRoute !== false) saveRoute();
   // the handle is display:none the moment .thread-open goes: focus would fall
   // to <body> and the tab order would restart at the top of the page
   if (elThreadResize && document.activeElement === elThreadResize) {
@@ -2635,8 +2753,17 @@ function bumpChannel(m) {
 }
 
 async function refreshPins() {
-  const d = await fetch("/api/channels/" + S.channel + "/messages").then(r => r.json());
-  renderPins(d.pins);
+  const generation = S.generation, request = ++S.pinGeneration;
+  try {
+    const d = await fetchJSON("/api/channels/" + encodeURIComponent(S.channel) + "/pins", S.controller.signal);
+    if (generation !== S.generation || request !== S.pinGeneration) return;
+    S.newestProposal[S.channel] = d.heads.proposed;
+    S.approvedProposal[S.channel] = d.heads.approved;
+    renderPins(d.pins); refreshClanHeads();
+  } catch (error) {
+    if (generation === S.generation && request === S.pinGeneration && error.name !== "AbortError")
+      connectionStatus("Pinned messages unavailable.", refreshPins);
+  }
 }
 
 // Per-role context meters from the clan endpoint. One track per role; the
@@ -2649,8 +2776,10 @@ async function refreshClan(force) {
   if (!force && now - clanFetchedAt < 10000) return;
   clanFetchedAt = now;
   if (!S.channel) return;
+  const generation = S.generation, request = ++S.clanGeneration;
   try {
-    const d = await fetch("/api/channels/" + S.channel + "/clan").then(r => r.json());
+    const d = await fetchJSON("/api/channels/" + encodeURIComponent(S.channel) + "/clan", S.controller.signal);
+    if (generation !== S.generation || request !== S.clanGeneration) return;
     paintMap(d);                    // one fetch feeds both the meter and the map
     const roles = d.roles || [];
     elClanMeter.hidden = !roles.length;
@@ -2674,62 +2803,108 @@ async function refreshClan(force) {
       div.append(track, nm);
       return div;
     }));
-  } catch { elClanMeter.hidden = true; }
+  } catch { if (generation === S.generation && request === S.clanGeneration) elClanMeter.hidden = true; }
 }
 
-async function selectChannel(ch) {
+async function selectChannel(ch, route={}) {
+  if (!/^[A-Za-z0-9_.-]+$/.test(ch) || ch === "." || ch === "..") return;
+  if (S.controller) S.controller.abort();
+  const controller = S.controller = new AbortController(), generation = ++S.generation;
   if (S.es) { S.es.close(); S.es = null; }
   if (clanRefreshTimer) { clearTimeout(clanRefreshTimer); clanRefreshTimer = 0; }
-  Object.assign(S, { channel: ch, seen: new Set(), last: "", byId: new Map(), kids: new Map(), agents: new Set(), lastDay: "" });
-  closeThread();
-  closePreview();          // a stale file must not stay open over a new channel
-  paintMap(null);          // clear the map like the thread and preview, before the refetch
+  clanFetchedAt = 0;
+  closeThread(false);
+  Object.assign(S, { channel: ch, seen: new Set(), last: "", byId: new Map(), kids: new Map(), agents: new Set(), lastDay: "",
+                    nextBefore:null, paging:false, filters:{query:route.query || "", mention:route.mention || "", operator:!!route.operator} });
+  closePreview();
+  paintMap(null);
   elChanname.textContent = "#" + ch;
-  elMessages.innerHTML = "";
-  elPins.innerHTML = "";
-  elProgress.hidden = true;
-  elClanMeter.hidden = true;
+  elMessages.innerHTML = ""; elPins.innerHTML = ""; elPresence.innerHTML = "";
+  elProgress.hidden = true; elClanMeter.hidden = true;
   elFilter.innerHTML = '<option value="">everyone</option>';
-  location.hash = ch;
-  // paint the active row now, not after the fetch: on a slow channel the
-  // sidebar would otherwise keep highlighting the previous row while the new
-  // channel's header and body have already swapped in. The post-fetch call
-  // below stays for the count/order resync.
+  if (S.filters.mention) { S.agents.add(S.filters.mention); elFilter.add(new Option("@" + S.filters.mention, S.filters.mention)); }
+  elFilter.value = S.filters.mention;
+  elSearch.value = S.filters.query; elOperator.checked = S.filters.operator;
+  elOlder.hidden = true; $("#historyStatus").textContent = "";
+  saveRoute(route.thread);
   renderChannels();
-
-  const d = await fetch("/api/channels/" + ch + "/messages").then(r => r.json());
-  for (const m of d.messages) ingest(m, false);
-  // messages posted while this channel was unselected were never streamed to us,
-  // so resync the row from the full fetch before repainting (and catch its order up)
-  const me = S.channels.find(c => c.name === ch);
-  if (me) { me.count = d.messages.length; me.last_id = S.last || me.last_id; }
-  renderChannels();
-  for (const id of S.kids.keys()) paintFoot(id);
-  renderPins(d.pins);
-  refreshClan(true);
-  if (!d.messages.length) {
-    const empty = document.createElement("div");
-    empty.className = "empty-row";
-    empty.textContent = "No messages yet.";
-    elMessages.appendChild(empty);
+  connectionStatus("Loading messages…");
+  const current = () => generation === S.generation;
+  try {
+    const d = await fetchJSON(historyURL(), controller.signal);
+    if (!current()) return;
+    S.newestProposal[ch] = d.heads.proposed; S.approvedProposal[ch] = d.heads.approved;
+    for (const m of d.messages) ingest(m, false, true);
+    S.last = d.tip || ""; S.nextBefore = d.next_before;
+    elOlder.hidden = !S.nextBefore; elOlder.disabled = false;
+    renderChannels();
+    refreshPins(); refreshClan(true);
+    if (!d.messages.length) {
+      const empty = document.createElement("div"); empty.className = "empty-row";
+      empty.textContent = "No matching messages."; elMessages.appendChild(empty);
+    }
+    if (route.thread) openThread(route.thread);
+    connectStream(generation);
+  } catch (error) {
+    if (current() && error.name !== "AbortError")
+      connectionStatus("Could not load messages.", () => selectChannel(ch, route));
   }
+}
 
-  // `since` is the last id already on screen; the server replays anything posted
-  // between that fetch and this connect, and ingest() drops the duplicates.
-  const es = new EventSource("/api/channels/" + ch + "/events?since=" + encodeURIComponent(S.last));
-  S.es = es;
-  es.addEventListener("hello", e => renderPresence(JSON.parse(e.data).presence));
-  es.addEventListener("presence", e => renderPresence(JSON.parse(e.data).presence));
-  es.addEventListener("clan", scheduleClanRefresh);
+function connectStream(generation) {
+  if (generation !== S.generation) return;
+  if (S.es) S.es.close();
+  const es = S.es = new EventSource("/api/channels/" + encodeURIComponent(S.channel) + "/events?since=" + encodeURIComponent(S.last));
+  const current = () => generation === S.generation && S.es === es;
+  connectionStatus("Connecting…");
+  es.onopen = () => { if (current()) connectionStatus("Live"); };
+  es.onerror = () => { if (current()) connectionStatus("Connection lost. Reconnecting…", () => connectStream(generation)); };
+  for (const event of ["hello", "presence"]) es.addEventListener(event, e => {
+    if (current()) renderPresence(JSON.parse(e.data).presence);
+  });
+  es.addEventListener("clan", () => { if (current()) scheduleClanRefresh(); });
   es.addEventListener("message", e => {
+    if (!current()) return;
     const m = JSON.parse(e.data);
+    S.last = m.id;
     if (!ingest(m, true)) return;
-    if (m.pin || "unpin" in m) refreshPins();
-    refreshClan();                        // context moves on every turn
+    if (m.pin || "unpin" in m || (m.attachments || []).some(a => inferType(a) === "clan")) refreshPins();
+    refreshClan();
   });
 }
 
+async function loadOlder() {
+  if (S.paging || !S.nextBefore) return;
+  const generation = S.generation;
+  S.paging = true; elOlder.disabled = true; $("#historyStatus").textContent = "Loading…";
+  const anchor = elMessages.querySelector(".msg:not([hidden])");
+  const top = anchor && anchor.getBoundingClientRect().top;
+  try {
+    const d = await fetchJSON(historyURL(S.nextBefore), S.controller.signal);
+    if (generation !== S.generation) return;
+    // Render the older page separately, then prepend it without moving existing nodes.
+    const existing = [...elMessages.childNodes];
+    existing.forEach(node => node.remove());
+    const lastDay = S.lastDay;
+    S.lastDay = "";
+    for (const m of d.messages) ingest(m, false, true);
+    elMessages.append(...existing); S.lastDay = lastDay;
+    S.nextBefore = d.next_before; elOlder.hidden = !S.nextBefore;
+    applyFilter();
+    if (anchor) window.scrollBy(0, anchor.getBoundingClientRect().top - top);
+    $("#historyStatus").textContent = S.nextBefore ? "" : "Beginning of matching history";
+  } catch (error) {
+    if (generation === S.generation && error.name !== "AbortError")
+      $("#historyStatus").textContent = "Could not load older messages. Try again.";
+  } finally {
+    if (generation === S.generation) { S.paging = false; elOlder.disabled = false; }
+  }
+}
+elOlder.addEventListener("click", loadOlder);
+
+let bootGeneration = 0;
 async function boot() {
+  const request = ++bootGeneration;
   const q = new URLSearchParams(location.search);
   if (q.get("token")) {
     storeToken(q.get("token"));
@@ -2739,15 +2914,20 @@ async function boot() {
   } else {
     try { S.token = localStorage.getItem(TOKEN_KEY); } catch (e) {}
   }
-  const { channels } = await fetch("/api/channels").then(r => r.json());
+  let channels;
+  connectionStatus("Loading channels…");
+  try { ({channels} = await fetchJSON("/api/channels")); }
+  catch { if (request === bootGeneration) connectionStatus("Could not load channels.", boot); return; }
+  if (request !== bootGeneration) return;
   if (!channels.length) {
+    connectionStatus("No channels yet");
     elMessages.innerHTML = '<p style="color:var(--text-muted)">No channels yet. Start an agent and post to one.</p>';
     return;
   }
   S.channels = channels;
   renderChannels();                        // the server already ordered them; sort again anyway
-  const want = decodeURIComponent(location.hash.slice(1));
-  selectChannel(channels.some(c => c.name === want) ? want : channels[0].name);
+  const route = readRoute();
+  selectChannel(route.channel || channels[0].name, route);
 }
 boot();
 </script>

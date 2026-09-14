@@ -12,6 +12,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from . import legacy
+from .history import clan_heads, matches, page_result, validate_page
 from .paths import channel_path, confined
 from .schema import (
     valid_timestamp,
@@ -169,6 +170,34 @@ class Bus:
             start = next((i + 1 for i, m in enumerate(msgs) if m["id"] == since), 0)
             return msgs[start:start + limit] if limit is not None else msgs[start:]
         return self.store.read_since(since, limit)
+
+    def summary(self):
+        if self.is_legacy:
+            msgs = self.read_all()
+            return {'count': len(msgs), 'last': msgs[-1] if msgs else {}}
+        return self.store.summary()
+
+    def clan_heads(self):
+        if self.is_legacy:
+            return clan_heads(reversed(self.read_all()))
+        return self.store.clan_heads()
+
+    def history(self, before=None, limit=100, query='', mention='', operator=False):
+        validate_page(before, limit, query, mention, operator)
+        if self.is_legacy:
+            msgs = self.read_all()
+            tip = msgs[-1]['id'] if msgs else None
+            if before:
+                index = next((i for i, m in enumerate(msgs) if m['id'] == before), None)
+                if index is None:
+                    raise ValueError('history cursor no longer exists; reload the channel')
+                msgs = msgs[:index]
+            rows = [m for m in reversed(msgs) if matches(m, query, mention, operator)][:limit + 1]
+            result = page_result(rows, limit, tip)
+            if before is None:
+                result['heads'] = clan_heads(reversed(msgs))
+            return result
+        return self.store.history(before, limit, query, mention, operator)
 
     def tip(self) -> str | None:
         if self.is_legacy:

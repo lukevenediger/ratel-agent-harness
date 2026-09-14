@@ -11,6 +11,7 @@ import time
 from contextlib import contextmanager
 from pathlib import Path
 
+from .history import clan_heads, matches, page_result, validate_page
 from .paths import confined
 from .schema import is_message, valid_timestamp, validate_limit, validate_message, validate_name
 
@@ -263,6 +264,49 @@ class Store:
                 except ValueError:
                     continue
             return out
+
+    def summary(self):
+        with self.connection() as con:
+            count = con.execute('SELECT count(*) FROM messages').fetchone()[0]
+            last = next((doc for row in con.execute('SELECT doc FROM messages ORDER BY seq DESC')
+                         if (doc := self.decode(row[0])) is not None), {})
+            return {'count': count, 'last': last}
+
+    @staticmethod
+    def _clan_heads(con):
+        rows = con.execute("SELECT doc FROM messages WHERE EXISTS "
+                           "(SELECT 1 FROM json_each(doc, '$.attachments') "
+                           "WHERE CASE WHEN type='object' THEN json_extract(value, '$.type') END='clan') "
+                           "ORDER BY seq DESC")
+        return clan_heads(doc for row in rows if (doc := Store.decode(row[0])) is not None)
+
+    def clan_heads(self):
+        with self.connection() as con:
+            return self._clan_heads(con)
+
+    def history(self, before=None, limit=100, query='', mention='', operator=False):
+        validate_page(before, limit, query, mention, operator)
+        with self.connection() as con:
+            tip = next((doc['id'] for row in con.execute('SELECT doc FROM messages ORDER BY seq DESC')
+                        if (doc := self.decode(row[0])) is not None), None)
+            boundary = None
+            if before:
+                row = con.execute('SELECT seq FROM messages WHERE id=?', (before,)).fetchone()
+                if row is None:
+                    raise ValueError('history cursor no longer exists; reload the channel')
+                boundary = row[0]
+            sql = 'SELECT doc FROM messages' + (' WHERE seq<?' if boundary is not None else '')
+            rows = []
+            for row in con.execute(sql + ' ORDER BY seq DESC', (boundary,) if boundary is not None else ()):
+                doc = self.decode(row[0])
+                if doc is not None and matches(doc, query, mention, operator):
+                    rows.append(doc)
+                    if len(rows) > limit:
+                        break
+            result = page_result(rows, limit, tip)
+            if before is None:
+                result['heads'] = self._clan_heads(con)
+            return result
 
     def thread(self, message_id):
         with self.connection() as con:

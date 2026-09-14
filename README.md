@@ -90,6 +90,18 @@ uv run pytest -q
 
 Every test uses a temporary home; nothing touches the real `~/.ratel`.
 
+The browser acceptance test uses Node Playwright and Chromium. With an existing Playwright
+installation, expose its `node_modules` using `NODE_PATH` and run:
+
+```bash
+NODE_PATH=/path/to/node_modules uv run --frozen pytest -q tests/test_board_browser.py
+```
+
+To install an isolated test runtime: `npm install --prefix /tmp/ratel-browser-tests playwright`,
+then `/tmp/ratel-browser-tests/node_modules/.bin/playwright install chromium` and use
+`NODE_PATH=/tmp/ratel-browser-tests/node_modules`. Without Playwright the browser test reports
+an explicit skip; the existing Node and HTTP tests still run.
+
 ## Licence
 
 MIT — see [LICENSE](LICENSE). The vendored mermaid bundle's MIT notice is
