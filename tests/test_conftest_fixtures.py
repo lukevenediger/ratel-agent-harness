@@ -101,15 +101,20 @@ def test_reaped_subprocesses_killpgs_the_group_on_teardown():
     os.killpg(pgid, 0)                          # the group is alive before teardown
     with pytest.raises(StopIteration):
         next(gen)                               # teardown killpgs whatever survives
-    deadline = time.monotonic() + 5             # a freshly SIGKILLed orphan is a
-    while time.monotonic() < deadline:          # zombie for a moment before reaping
-        try:
-            os.killpg(pgid, 0)
-        except ProcessLookupError:
-            break                               # the orphan sleep died with the group
+    deadline = time.monotonic() + 5
+    while time.monotonic() < deadline:
+        # On macOS, killpg(..., 0) can report EPERM for a dying orphan group.
+        # Inspect members instead: zombies have exited and cannot leak work.
+        listing = subprocess.run(["ps", "-axo", "pgid=,stat="],
+                                 capture_output=True, text=True, check=True)
+        live = [line for line in listing.stdout.splitlines()
+                if len(fields := line.split()) == 2
+                and fields[0] == str(pgid) and not fields[1].startswith("Z")]
+        if not live:
+            break
         time.sleep(0.05)
     else:
-        pytest.fail("the process group survived teardown")
+        pytest.fail(f"live processes survived group teardown: {live}")
 
 
 def test_live_zellij_sessions_returns_none_when_the_listing_fails(tmp_path, monkeypatch):
