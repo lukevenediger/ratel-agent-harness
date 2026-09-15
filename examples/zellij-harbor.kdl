@@ -15,6 +15,6 @@ layout {
     tab name="worker-b" cwd="~/code/harbor-wt/b" { pane }
     tab name="security" cwd="~/code/harbor-wt/sec" { pane }
     tab name="bus" cwd="~/.ratel/channels/harbor" {
-        pane command="tail" { args "-f" "bus.jsonl" }
+        pane command="ratel" { args "tail" "--channel" "harbor" }
     }
 }

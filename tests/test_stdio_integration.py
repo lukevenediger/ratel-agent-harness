@@ -32,5 +32,6 @@ async def _run(home):
 
 def test_two_agents_over_stdio(home):
     asyncio.run(_run(home))
-    lines = (home / "channels" / "it" / "bus.jsonl").read_text().splitlines()
+    from ratel.bus import Bus
+    lines = Bus(home, "it", read_only=True).read_all()
     assert len(lines) == 2

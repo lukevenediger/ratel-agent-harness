@@ -1,208 +1,256 @@
-# ratel clan — quick and dirty user guide
+# Using Ratel
 
-How to go from "I have an issue" to "a clan of agents built it and opened a PR", on Linux or macOS.
-Reference detail lives in [harness-setup.md](harness-setup.md), [cli-contract.md](cli-contract.md),
-[ARCHITECTURE.md](ARCHITECTURE.md) and [DECISIONS.md](DECISIONS.md). This page is the short path.
+Ratel gives coding agents a shared conversation and gives you a live board. You can connect
+sessions you already run, or start a **clan** that works on a GitHub issue using an orchestrator,
+a writer and reviewers. Start with the demo if you want to see the interface before configuring agents.
 
-## 0. One-time setup
+## 1. Install
 
-```bash
-cd <path-to-your-clone>
-uv sync
-uv tool install --editable . --force      # puts ratel, ratel-board, ratel-mcp… on PATH
-
-# Zellij 0.44+ — install it however your platform prefers:
-#   macOS:       brew install zellij
-#   via Rust:    cargo install zellij
-#   distro pkg:  apt install zellij   /   dnf install zellij   /   pacman -S zellij
-#   release:     https://zellij.dev/documentation/installation
-
-gh auth status                             # the clan uses your gh login for issues, labels, PRs
-```
-
-Provider keys live in `<path-to-your-clone>/.env` (gitignored, never printed). Copy
-`.env.example` and fill it in, then export them in the shell that will launch a clan — tabs inherit
-that shell's environment:
+You need Python 3.12+ and [uv](https://docs.astral.sh/uv/getting-started/installation/).
+Install from GitHub (the distribution is named `ratel`):
 
 ```bash
-set -a; . <path-to-your-clone>/.env; set +a
-export DEEPSEEK_API_KEY                             # developer, on DeepSeek direct
-export OPENROUTER_API_KEY="$OPENROUTER_API_TOKEN"   # docs + any OpenRouter preset
+uv tool install git+https://github.com/lukevenediger/ratel-agent-harness
+ratel --help
 ```
 
-**The names on the left are the only ones that count.** `clan up` refuses to start a role whose
-model needs a key that is not exported, and it checks the exact variable the models catalog names
-— `DEEPSEEK_API_KEY`, `OPENROUTER_API_KEY`. A `.env` that spells one of them differently
-(`OPENROUTER_APO_TOKEN` has happened) fails every OpenRouter role at that check with
-`developer: OPENROUTER_API_KEY`, which looks like a missing key rather than a typo three files
-away. Read the required names out of `ratel clan catalog` (`models[].env`) rather than
-trusting the `.env`.
-
-Board, once, outside any zellij session (serves every channel):
+For development, clone the repository and install it editable:
 
 ```bash
-ratel-board --host <your-tailnet-ip> --port 8787   # tailnet address; never `tailscale funnel`
+git clone https://github.com/lukevenediger/ratel-agent-harness.git
+cd ratel-agent-harness
+uv sync --frozen
+uv tool install --editable .
 ```
 
-`tailscale ip -4` prints your address. Open <http://<your-tailnet-ip>:8787/>. Phone works.
-Pick a channel from the left rail.
+Make sure `ratel`, `ratel-mcp`, `ratel-unread` and `ratel-board` are on the PATH seen by your
+agent sessions. An editable install follows source changes; reinstall after entry points or
+dependencies change. See [Contributing](../CONTRIBUTING.md) for tests.
 
-## 1. Write the issue (GitHub is the source of truth)
+## 2. Try the board without agents
 
-**The issue is the plan.** No approval label, no `<!-- plan-run -->` comment — the orchestrator reads
-the body and the comments (newest wins where they disagree) and works from that. Write enough for a
-clan to build from: what to change, the checks to run, and ideally a `Footprint:` line naming the
-files it touches (it decides whether a second writer is possible; without one the orchestrator
-derives it and says so in the proposal).
-
-The issue must still carry none of `needs-spec`, `needs-operator`, `dispatched`, have no open PR and
-no open sub-issues — an epic with children is a tracker, not work.
-
-Want a fuller plan written for you: open `claude` in the repo and run `/plan-issue <n>` (how-we-work
-skill). Optional — a hand-written issue dispatches exactly the same.
-
-## 2. Start a clan
+Choose a directory that does **not** exist yet:
 
 ```bash
-ratel clan new <path-to-your-clone> 15       # <checkout> <issue>; prints the attach command
-zellij attach harbor-15-0910-1423       # channel is <repo>-<issue>; the session adds a stamp
+ratel demo --home /tmp/ratel-demo
+ratel-board --home /tmp/ratel-demo
 ```
 
-The channel is `harbor-15` and stays that — it is what `--channel` and the board use. The
-**zellij session** is the channel plus the start time, because zellij keeps exited sessions listed
-for `attach` to resurrect and a restart must not collide with its predecessor. Take the name from
-`clan new`, from `clan status`, or from `clan.state.json`.
+Open <http://127.0.0.1:8787/#harbor-demo>. Inspect the pinned plan, open a review thread and
+preview an attachment. Everything is synthetic: this starts no agents and needs no provider
+credentials. Stop the board with Ctrl+C. Use another new directory to repeat the demo.
 
-A zellij socket path caps at 103 bytes and macOS `$TMPDIR` eats ~49 of them, so a long name gets
-shortened — the stamp drops its date first (`-0910-1423` → `-1423`), and only then does the
-channel lose characters off its front. `clan new` says so on stderr when it happens.
+## 3. Send your first messages
 
-`clan new` creates the channel, a detached zellij session with tabs `orchestrator` (Claude, Fable
-latest, already running `/clan:dispatch-issue 15`), `watch` (the nudge dispatcher) and `bus` (raw log),
-and prints the attach command. Board: `http://<your-tailnet-ip>:8787/#harbor-15`.
-
-Options: `--orchestrator-model M`, `--orchestrator-harness claude|opencode` (the GLM-as-orchestrator
-experiment), `--unattended` (catalog defaults, headless roles, no approval gate — Tier 2 only, see #8).
-
-Tip: pin a **stakeholder note** on the channel before attaching if the orchestrator needs context the
-issue does not carry (`AGENT_NAME=stakeholder CHANNEL=harbor-15 ratel post --pin "…"`).
-
-## 3. Approve the clan
-
-The orchestrator reads the plan, checks the guards, locks the issue (assigns you), and posts a
-**clan proposal**: role, setup, why. It stops and waits.
-
-The proposal is a card on the board. Open the board once with the token URL `ratel-board`
-prints; Confirm posts the approved clan back on the channel and the orchestrator picks it up.
-On the card you can:
-
-- **change a role's setup** — one dropdown per row, listing curated presets like
-  `1) opencode · DeepSeek Flash · DeepSeek · high`. A preset is the harness, the model and
-  the provider's own effort word in one choice, so you cannot assemble a combination that does not
-  work. Nothing else picks a model.
-- **move the writer** — one radio, and exactly one role must hold it.
-- **add a role** — the dropdown offers the catalogued roles this clan is missing; the box beside
-  it takes a name of your own. Eight roles maximum, and the control disables at the cap.
-- **remove a role** with the `×`. The proposal is a suggestion: if you want only a security
-  reviewer, delete the rest. Removing the row that holds the writer leaves the clan without one,
-  which shows as an error and disables Confirm until you give it to somebody.
-- **edit skills and the role's name**; `why` is the orchestrator's argument for the role and is
-  read-only.
-
-The orchestrator plans around the clan that comes back, not the one it proposed — if you amended
-the card, it rewrites and re-pins the execution plan and the clan diagram before dispatching.
-
-Catalog defaults (`ratel clan catalog`): developer = `deepseek-flash-high` (the only writer);
-reviewer and security-reviewer = `opus-high`; simplifier = `opus-medium`; docs =
-`or-deepseek-flash-high`; orchestrator = `fable-high`, fixed at kickoff. Override per run on the
-card, or permanently in `~/.ratel/roles.toml` (a role's `preset` key) and
-`~/.ratel/presets.toml` (a preset of your own, deep-merged over the packaged list).
-
-If you want a combination nobody curated, add it to `~/.ratel/presets.toml` — an id, an
-`order`, a `label`, and the harness/model/effort it stands for — and it appears in the dropdown.
-
-Then the orchestrator runs `clan up`: one git worktree per role under `~/<repo>-wt/<issue>-<role>`
-(the writer holds branch `issue-<n>`, others are detached at its tip), one config dir per role under the
-channel, one tab per role named after the role. First time in a new worktree, Claude shows a trust
-dialog in the tab: accept it.
-
-## 4. While it runs
-
-You can watch, or walk away.
-
-- **Board**: pinned plan + checklist with the progress bar in the header; every dispatch, result and
-  `VERDICT:` line; evidence files attached. Per-role context meter comes from `clan status`.
-- **Threads**: click a message with replies to open the thread on the right. Drag its left edge to
-  make it wider — the width is remembered in that browser, and the message column reflows to
-  match. Keyboard: tab to the edge and use the arrow keys (left widens), Home/End for the
-  extremes, Enter to reset. On a phone the thread is a full-screen sheet instead.
-- **Reading an attached document**: a `.md` or a `.log` attachment has a **preview** button beside
-  its link. Markdown opens in a panel with real headings, tables, task lists and — for a
-  ```` ```mermaid ```` fence — the rendered diagram, so the orchestrator's `plans/clan.md` reads as
-  a diagram rather than as source. A `.log` opens as plain text, never interpreted. A diagram that
-  will not parse keeps its source on screen with the parse error under it, so nothing is ever
-  hidden by a rendering failure. A mermaid fence posted in a MESSAGE shows a `render diagram`
-  button instead of rendering by itself — the renderer is ~1 MB and is not downloaded until
-  something on screen actually needs it.
-- **Tabs**: `zellij attach <the session clan new printed>`, `Ctrl+t` then arrows or the tab name to move. You can type
-  into any role's tab; it is just its harness. Detach with `Ctrl+o d`.
-- **Nudges**: a role hears `@role` because the watcher types one line into its pane. If a nudge landed
-  mid-turn and was swallowed, re-send it: `ratel clan nudge developer --channel harbor-15`.
-- **Status**: `ratel clan status --channel harbor-15 --pretty` (add `--screen` for the last 20
-  lines of each pane). Shows worktree, branch, dirty, presence, `context_tokens`, last nudge,
-  and a state per role — `awaiting-operator` means a permission dialog is open in that tab.
-- **Context**: roles are cleared at task boundaries by the orchestrator and compacted automatically when
-  idle above 200k tokens (`checkpoint_at`, per role). By hand: `ratel clan checkpoint developer
-  --channel harbor-15` (`--mode compact` to keep the thread).
-- **Change of priorities**: tell the orchestrator in its tab. It re-pins the plan in its own words.
-
-Rounds: orchestrator dispatches one role per message in a thread, verifies the result itself, gates on
-`VERDICT: SIGN-OFF` from reviewer, simplifier and security-reviewer; `CHANGES-REQUESTED` loops back to
-the writer.
-
-## 5. Session end
-
-The orchestrator: syncs the base branch by merge, runs the plan's verification plus the repo checks,
-requires the three sign-offs, opens **one PR** on `issue-<n>` with a "Plan deviations" section, removes
-the assignee, pins a run summary, then `clan down`. It never merges.
-
-You: review the PR, merge (squash), then clean up:
+Ratel normally stores channels in `~/.ratel`. Set `RATEL_HOME` to use another home, and give
+**every** CLI, MCP server and board process the same value. For an isolated walkthrough:
 
 ```bash
-gh pr merge <pr> -R <owner>/<repo> --squash --delete-branch
-ratel clan down --channel harbor-15 --prune-worktrees   # if the clan did not prune
-git -C <path-to-your-clone> fetch -p && git -C <path-to-your-clone> reset --hard origin/main
-uv tool install --editable <path-to-your-clone> --force          # if ratel itself changed
+export RATEL_HOME="$(mktemp -d /tmp/ratel-walkthrough.XXXXXX)"
+ratel post --channel harbor --agent worker-a "@reviewer Please review the auth change"
+ratel read --channel harbor --agent reviewer --pretty
+ratel post --channel harbor --agent reviewer "@worker-a Review received"
+ratel read --channel harbor --agent worker-a --pretty
+ratel-board
 ```
 
-## 6. Another repo
+Open <http://127.0.0.1:8787/#harbor>. `post` prints a message ID; `read` returns new messages
+from others and advances that agent's cursor. A second read with no new messages returns an
+empty list. Each agent needs a distinct name so they do not consume each other's unread messages.
 
-Same commands; nothing is per-repo. `~/.ratel` is shared, the board shows every channel.
+For repeated commands, export `CHANNEL=harbor` and `AGENT_NAME=worker-a`. Explicit `--channel`
+and `--agent` options override those defaults. Useful next commands:
 
 ```bash
-git clone git@github.com:<owner>/harbor.git ~/harbor
-ratel clan new ~/harbor 42        # then attach to the session it prints
+ratel catch-up --channel harbor --agent worker-a --pretty
+ratel post --channel harbor --agent worker-a --pin "Plan: implement, test, review"
+ratel tail --channel harbor
 ```
 
-Plain ratel without a clan (one session on a channel): copy `examples/mcp.json` to the repo's
-`.mcp.json` and `examples/claude-settings.json` to `.claude/settings.json`, set `AGENT_NAME`/`CHANNEL`.
-From a shell: `AGENT_NAME=operator CHANNEL=harbor ratel post "hello"`.
+`catch-up` includes pins and unread messages. `tail` follows the log without moving a cursor.
+Use `post --parent MESSAGE_ID` for a reply and `post --attach /path/to/file` for evidence.
+The board can browse without an agent identity. See the [CLI contract](cli-contract.md) for all commands.
 
-## 7. When something is off
+### Connect agents you already run
 
-| Symptom | Do |
-|---|---|
-| Role sits idle after a dispatch | `clan status --screen`; re-nudge; check a trust or permission dialog in its tab |
-| `awaiting-operator` on the board, or an `@stakeholder … permission prompt in tab N` post | attach, go to that tab, answer the dialog; the role resumes on its own |
-| Forgot the attach name | `ratel clan status --channel <channel>` prints `session` |
-| `clan up` refuses: branch checked out elsewhere | this checkout holds `issue-<n>`; `git checkout main` (or a `-host` branch) and retry |
-| Orchestrator refuses to dispatch | `needs-spec`/`needs-operator`/`dispatched` label, an open PR, or open sub-issues; see §1 |
-| Stray zellij session from a test | `zellij delete-session --force <name>`; tests must not touch the live server (#6) |
-| Board shows nothing for the channel | board reads `~/.ratel`; `RATEL_HOME` on the board and on `clan new` must match |
-| Channels missing after upgrading from `agent-chat` | the home is now `~/.ratel`; `AGENTCHAT_HOME` is a deprecated fallback with a warning, or `mv ~/.agentchat ~/.ratel` |
-| Model key missing | export it in the shell **before** `clan new`; tabs inherit that environment |
+Follow [harness setup](harness-setup.md#connect-existing-agent-sessions) to add the Ratel MCP
+server to each worktree. Give sessions different `AGENT_NAME` values, the same `CHANNEL` and
+the same home. Add the coordination instructions in [examples/AGENT.md](../examples/AGENT.md)
+to their existing instructions, adapting the placeholders. Agents should catch up at startup,
+post results into their task thread and wait for mentions when idle.
 
-Tests: `uv run pytest -q` (unit), `uv run pytest -q -m zellij` (real isolated zellij round),
-`uv run pytest -q -m headless` (real `claude -p` / `opencode run`, opt-in),
-`CLAN_SANDBOX_REPO=<owner>/clan-sandbox uv run pytest -q -m llm tests/e2e` (Tier 2, needs
-`CLAN_SANDBOX_TOKEN`, see #8).
+A plain channel does not start agents, create worktrees or type into terminals. The following
+sections add those capabilities with a clan.
+
+## 4. Prepare a clan
+
+In addition to Ratel, install Git, GitHub CLI, the harnesses selected by your presets, and one
+terminal backend. Authenticate `gh` for the target repository:
+
+```bash
+gh auth status
+ratel clan catalog --pretty
+```
+
+The catalog lists available roles, presets, harnesses and models. A **preset** combines a
+harness, model and effort setting. Inspect `models[].env` for required environment-variable
+names, then export the corresponding credentials in the shell that launches the clan. Ratel
+does not load a `.env` automatically. Harness login credentials must also be available to
+its child processes. Select presets you have access to; the catalog is configuration, not
+proof of provider entitlement.
+
+### Choose the terminal backend
+
+| Backend | What you get | Select it |
+|---|---|---|
+| HerdR 0.9.0+ | Shared Ratel session, one workspace per clan, agent activity and readiness-aware nudges | Default for new clans; `--terminal herdr` |
+| Zellij 0.44.1 | Separate tabbed session per clan, existing pane-based workflow | `--terminal zellij` |
+
+Install [HerdR](https://herdr.dev/docs/install/) or
+[Zellij](https://zellij.dev/documentation/installation). To save a preference, add this to
+`$RATEL_HOME/config.toml` (normally `~/.ratel/config.toml`):
+
+```toml
+[terminal]
+backend = "herdr"
+```
+
+This is a **preference with a per-launch override**, independent of the agent harness and
+`--unattended` mode. Existing clans keep their recorded backend; older clans without a backend
+field use Zellij. Changing the preference does not move a running clan.
+
+### Prepare the issue and checkout
+
+Use a local checkout with access to its GitHub remote. Write an issue with the intended result,
+acceptance checks and relevant files. Its body and comments are the plan. Resolve `needs-spec`
+or `needs-operator` labels first. The dispatch workflow stops if the issue is already marked
+`dispatched`, has an open PR, or has open sub-issues.
+
+Keep the hosting checkout on its base branch: the writer needs `issue-<number>` in a separate
+worktree. Commit or preserve existing work before switching branches.
+
+## 5. Launch and approve
+
+The rest of this guide uses a checkout named `harbor` and issue 42. Substitute your path and issue:
+
+```bash
+ratel-board
+```
+
+Leave the board running. In another shell with the same home and credentials:
+
+```bash
+ratel clan new /path/to/harbor 42 --pretty
+```
+
+The JSON result includes the channel (`harbor-42`), backend, session and **`attach` command**.
+Run that command exactly as printed. HerdR uses Ratel's managed session, so a bare `herdr`
+command may open a different session. The initial tabs contain the orchestrator, watcher and bus.
+Worker tabs appear after approval. The board serves all channels, including this new one.
+
+The orchestrator reads the issue and posts a clan proposal. Open the token-bearing URL printed
+by `ratel-board` privately in your browser to enable **Confirm**. On the proposal card:
+
+- Choose a preset for each role, and edit its name or skills if needed.
+- Add or remove roles (eight maximum).
+- Select exactly one writer.
+- Press **Confirm** when the proposal matches the work you want done.
+
+The orchestrator consumes the approval with `clan approve`, updates the execution plan to
+match your choices, and calls `clan up`. You normally do not run those commands yourself.
+The writer gets branch `issue-42`; other roles get detached review worktrees under
+`/path/to/harbor-wt/42-<role>`. First launches may require trust or permission prompts in the
+agent's tab. Answer them there.
+
+The board token allows proposal confirmation. It is stored by your browser; do not share the
+startup URL or `board.token`. Ordinary channel/thread links omit it. Board reads have no login,
+so keep the service on localhost or a network whose readers you trust.
+
+## 6. Follow the work
+
+The board shows the pinned plan, task checklist, role details, dispatches, replies and review
+verdicts. Search spans the channel history; **Load older messages** extends the initial page.
+Use the agent and operator filters to narrow the view. Open threads for replies and preview
+Markdown/log attachments for evidence. **Live** indicates the event stream is connected;
+**Retry** retries a disconnected stream or failed load.
+
+```bash
+ratel clan status --channel harbor-42 --pretty
+ratel clan status --channel harbor-42 --screen --pretty
+ratel doctor --channel harbor-42 --pretty
+```
+
+Status includes worktrees, branch changes, presence, context usage and runtime state. With
+HerdR it also includes terminal activity and its freshness. `working` holds incoming nudges;
+`blocked` usually needs attention in the tab; `unknown` or `unavailable` is not permission to
+send input. `idle` or `done` allows delivery once Ratel verifies the agent identity. Terminal
+`done` is an activity signal: review acceptance still requires the workflow's `VERDICT:` messages.
+
+To ask an agent to check the channel:
+
+```bash
+ratel clan nudge developer --channel harbor-42
+```
+
+HerdR queues this durably until the agent is ready; a queued result does not mean it has been
+delivered. Zellij retains direct pane input. Keep the watcher running for automatic delivery.
+To change priorities, tell the orchestrator in its tab and have it update the pinned plan.
+
+At an idle task boundary you can reset a worker's context:
+
+```bash
+ratel clan checkpoint developer --channel harbor-42
+ratel clan checkpoint orchestrator --mode compact --channel harbor-42
+```
+
+Do not clear agents mid-task. The orchestrator cannot be cleared; operator-requested compaction
+is available when it is idle. Automatic compaction uses each role's configured threshold.
+
+## 7. Finish or stop
+
+The dispatch workflow verifies the work, obtains review sign-offs, opens a PR and posts a run
+summary. It does not merge the PR. Review and merge through your repository's normal process.
+You can also stop a clan yourself:
+
+```bash
+ratel clan down --channel harbor-42
+```
+
+This stops the clan's terminals and supervised headless processes. HerdR preserves other
+clans in the shared session. Channel history and worktrees remain available for inspection.
+After reviewing/saving the work, remove clean clan worktrees with:
+
+```bash
+ratel clan down --channel harbor-42 --prune-worktrees
+```
+
+Dirty worktrees are protected by default. Do not add `--force` unless you intend to discard
+their uncommitted changes. To update a clean hosting checkout after the PR merges:
+
+```bash
+git -C /path/to/harbor switch main
+git -C /path/to/harbor pull --ff-only
+```
+
+Use the repository's actual default branch if it is not `main`.
+
+## 8. Run unattended
+
+```bash
+ratel clan new /path/to/harbor 42 --unattended --terminal herdr
+```
+
+This explicitly opts into headless agent rounds and proposal auto-approval without the board
+confirmation step. It works with either terminal backend. Review the catalog and credentials
+before launching; unattended mode does not guarantee that permissions, providers or tasks
+will never require operator intervention.
+
+Per-role defaults stop a headless launch at 100 rounds, eight hours including idle time, or
+three consecutive failed rounds. Configure limits before launch and inspect the stop reason
+in status. See [operations](operations.md#headless-limits-and-output) for settings and recovery.
+
+## Next steps
+
+- [Configure harnesses and presets](harness-setup.md).
+- [Diagnose stalls, recover sessions, migrate or back up data](operations.md).
+- [Read command and state contracts](cli-contract.md).

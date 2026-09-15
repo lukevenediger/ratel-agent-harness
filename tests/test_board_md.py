@@ -42,7 +42,7 @@ def _slice(src, start, end="\n}\n"):
 
 def render(cases, tmp_path):
     """Run the page's real md() over `cases` under node."""
-    src = BOARD_HTML.read_text()
+    src = board_mod.board_page().decode()
     esc = src[src.index("const ESC = {"):src.index("\n", src.index("const esc = s =>")) + 1]
     script = tmp_path / "md_harness.js"
     # from md()'s module-level constants through the function itself: they are

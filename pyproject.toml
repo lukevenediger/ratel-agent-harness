@@ -4,7 +4,7 @@ version = "0.1.0"
 description = "Shared channel for coding agents + read-only board for the human"
 readme = "README.md"
 license = "MIT"
-license-files = ["LICENSE"]
+license-files = ["LICENSE", "THIRD-PARTY-NOTICES.md"]
 requires-python = ">=3.12"
 authors = [{ name = "Luke Venediger" }]
 keywords = ["agents", "multi-agent", "channel", "mcp", "board", "zellij"]
@@ -15,13 +15,14 @@ classifiers = [
   "Programming Language :: Python :: 3",
   "Programming Language :: Python :: 3.12",
   "Programming Language :: Python :: 3.13",
+  "Programming Language :: Python :: 3.14",
 ]
 dependencies = ["mcp>=2.1,<3"]
 
 [project.urls]
-Homepage = "https://github.com/lukevenediger/ratel"
-Repository = "https://github.com/lukevenediger/ratel"
-Issues = "https://github.com/lukevenediger/ratel/issues"
+Homepage = "https://github.com/lukevenediger/ratel-agent-harness"
+Repository = "https://github.com/lukevenediger/ratel-agent-harness"
+Issues = "https://github.com/lukevenediger/ratel-agent-harness/issues"
 
 [project.scripts]
 ratel = "ratel.cli:main"
@@ -56,6 +57,7 @@ packages = ["ratel"]
 testpaths = ["tests"]
 addopts = "-m 'not llm and not headless'"
 markers = [
+  "herdr: needs the real herdr binary; skipped when it is missing",
   "zellij: needs the real zellij binary; skipped when it is missing",
   "node: needs the node binary to run the board's md() directly; skipped when it is missing",
   "llm: spends real model tokens against a sandbox repo; opt in with -m llm",

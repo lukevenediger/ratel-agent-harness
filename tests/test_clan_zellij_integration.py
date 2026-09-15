@@ -109,7 +109,7 @@ def test_checkpoint_types_clear_enter_then_the_reorient_nudge(home, repo, zellij
     (home / "presets.toml").write_text(FAKE_PRESETS)
     (home / "roles.toml").write_text(ROLES_TOML)
     paths = C.ClanPaths(home, zellij_env.session)
-    S.new(home, repo, 42, session=zellij_env.session, zellij_env=zellij_env.env)
+    S.new(home, repo, 42, session=zellij_env.session, terminal="zellij", zellij_env=zellij_env.env)
     cfg = C.ClanConfig.read(paths, C.load_catalog(home))
     data = cfg.to_dict()
     data["roles"].update({"developer": {}, "reviewer": {}})
@@ -134,7 +134,7 @@ def test_one_round_through_real_tabs(home, repo, zellij_env):
     live_before = zellij_env.live_sessions()
     paths = C.ClanPaths(home, zellij_env.session)
 
-    out = S.new(home, repo, 42, session=zellij_env.session, zellij_env=zellij_env.env)
+    out = S.new(home, repo, 42, session=zellij_env.session, terminal="zellij", zellij_env=zellij_env.env)
     assert out["channel"] == zellij_env.session
     assert out["session"].startswith(f"{zellij_env.session}-")   # channel + timestamp
     assert out["attach"] == f"zellij attach {out['session']}"
@@ -182,7 +182,7 @@ def test_one_round_through_real_tabs(home, repo, zellij_env):
         rev_log = (paths.harness_dir("reviewer") / "nudges.log").read_text()
         assert "ratel: @reviewer 1 new on #" in rev_log     # a real keystroke nudge, not a poll
 
-        cursors = {p.stem for p in (paths.channel_dir / "cursors").glob("*.json")}
+        cursors = {p["agent"] for p in bus.presence()}
         assert cursors <= {"orchestrator", "developer", "reviewer"}
         assert "watch" not in cursors                          # the watcher owns no cursor
     finally:
@@ -255,7 +255,7 @@ text = "VERDICT: SIGN-OFF"
     live_before = zellij_env.live_sessions()
     paths = C.ClanPaths(home, zellij_env.session)
 
-    out = S.new(home, repo, 42, session=zellij_env.session, zellij_env=zellij_env.env)
+    out = S.new(home, repo, 42, session=zellij_env.session, terminal="zellij", zellij_env=zellij_env.env)
     assert out["channel"] == zellij_env.session
     assert out["session"].startswith(f"{zellij_env.session}-")   # channel + timestamp
     assert out["attach"] == f"zellij attach {out['session']}"

@@ -106,9 +106,11 @@ def sync_detached(repo: Path | str, path: Path | str, at: str) -> str:
     return rev
 
 
-def remove_worktree(repo: Path | str, path: Path | str, force: bool = True) -> None:
+def remove_worktree(repo: Path | str, path: Path | str, force: bool = False) -> None:
     path = Path(path)
     if path.resolve() in _worktrees(repo):
+        if not force and is_dirty(path):
+            raise ValueError(f"{path} has uncommitted changes — use --force with --prune-worktrees to discard them")
         git(repo, "worktree", "remove", *(["--force"] if force else []), str(path))
     git(repo, "worktree", "prune")
 

@@ -15,6 +15,7 @@ import mimetypes
 import os
 import re
 import secrets
+import sqlite3
 import stat
 import sys
 import threading
@@ -24,15 +25,28 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, unquote, urlparse
 
-from .bus import Bus, default_home, is_message, now_iso
+from .bus import Bus, default_home, now_iso
 from .clan.config import CATALOG_ERRORS, ClanConfig, ClanPaths, load_catalog, read_state
 from .clan.config import catalog as clan_catalog
 from .clan.proposal import validate_clan_attachment
 from .clan.session import ClanError, activity
+from .clan.state import revision as state_revision
+from .paths import channel_path, confined
+from .schema import validate_name
 from .ulid import is_ulid
 from .unfurl import unfurl
 
 STATIC = Path(__file__).parent / "static"
+
+
+def board_page() -> bytes:
+    """Assemble source modules without a build step or cross-origin assets."""
+    script = "\n".join((STATIC / name).read_text() for name in
+                       ("board-state.js", "board-render.js", "board-network.js"))
+    return (STATIC / "board.html").read_text().replace("<!-- BOARD_SCRIPTS -->",
+                                                      "<script>\n" + script + "</script>").encode()
+
+
 CHANNEL_RE = re.compile(r"^[A-Za-z0-9_.-]+$")
 # `repo` lands in the sidebar from the agent-writable clan.toml. A conservative
 # owner/name slug only; anything else is dropped, never escaped-and-shown.
@@ -172,10 +186,10 @@ def _read_state_nb(path: Path, attempts: int = 3, delay_s: float = 0.02) -> dict
 def _clan_signature(home: Path, ch: str) -> str:
     """A change signature over `clan.state.json` (mtime, size) and each
     `harness/<role>` directory mtime (it moves when `round.pid` is created or
-    unlinked). Stats only — no contents, no parser — so the SSE loop stays
+    unlinked). File stats plus the SQLite state revision keep the SSE loop
     cheap enough to wake every 0.5s."""
     base = home / "channels" / ch
-    parts: list[str] = []
+    parts: list[str] = [f"revision:{state_revision(ClanPaths(home, ch))}"]
     state = base / "clan.state.json"
     try:
         st = state.stat()
@@ -196,10 +210,23 @@ def _clan_signature(home: Path, ch: str) -> str:
 
 
 def list_channels(home: Path) -> list[str]:
-    root = home / "channels"
+    try:
+        root = confined(home, "channels")
+    except ValueError:
+        return []
     if not root.is_dir():
         return []
-    return sorted(p.name for p in root.iterdir() if (p / "bus.jsonl").is_file())
+    channels = []
+    for p in root.iterdir():
+        try:
+            validate_name(p.name)
+            if (channel_path(home, p.name, "channel.sqlite3").is_file()
+                    or channel_path(home, p.name, "bus.jsonl").is_file()):
+                channels.append(p.name)
+        except ValueError:
+            continue
+    return sorted(channels)
+
 
 
 class BoardHandler(BaseHTTPRequestHandler):
@@ -240,7 +267,7 @@ class BoardHandler(BaseHTTPRequestHandler):
         parts = [p for p in path.split("/") if p]
         try:
             if path == "/":
-                return self._send(200, (STATIC / "board.html").read_bytes(), "text/html; charset=utf-8",
+                return self._send(200, board_page(), "text/html; charset=utf-8",
                                   {"Cache-Control": "no-store",
                                    # the page holds the write token in localStorage: frame-busters
                                    # and a tight CSP are defence in depth against a future injection
@@ -271,6 +298,17 @@ class BoardHandler(BaseHTTPRequestHandler):
                 bus = self._bus(parts[2])
                 if bus is None:
                     return self._error(404, "no such channel")
+                if parts[3] == "history" and len(parts) == 4:
+                    try:
+                        if q.get("operator", "0") not in ("0", "1"):
+                            raise ValueError("operator must be 0 or 1")
+                        return self._json(bus.history(q.get("before"), int(q.get("limit", "100")),
+                                                      q.get("q", ""), q.get("mention", ""),
+                                                      q.get("operator") == "1"))
+                    except ValueError as e:
+                        return self._error(400, str(e))
+                if parts[3] == "pins" and len(parts) == 4:
+                    return self._json({"pins": bus.pins(), "heads": bus.clan_heads()})
                 if parts[3] == "messages" and len(parts) == 4:
                     raw_limit = q.get("limit", "")
                     limit = int(raw_limit) if raw_limit.isdigit() and int(raw_limit) > 0 else None
@@ -279,7 +317,7 @@ class BoardHandler(BaseHTTPRequestHandler):
                     t = bus.read_thread(parts[4])
                     return self._json(t) if t else self._error(404, "no such message")
                 if parts[3] == "events" and len(parts) == 4:
-                    return self._sse(bus, q.get("since"))
+                    return self._sse(bus, self.headers.get("Last-Event-ID") or q.get("since"))
                 if parts[3] == "clan" and len(parts) == 4:
                     return self._json(self._clan(parts[2]))
                 if parts[3] == "unfurl" and len(parts) == 4:  # wired in Task 10
@@ -290,12 +328,17 @@ class BoardHandler(BaseHTTPRequestHandler):
         except (BrokenPipeError, ConnectionResetError):
             pass
 
+        except (ValueError, sqlite3.Error):
+            self._error(409, "channel storage unavailable")
+
     # -- write route (token-gated) ---------------------------------------
     def do_POST(self):
         try:
             return self._do_post()
         except (BrokenPipeError, ConnectionResetError):
             pass
+        except (ValueError, sqlite3.Error):
+            self._error(409, "channel unavailable for writes; check storage and migration status")
 
     def _do_post(self):
         parts = [p for p in unquote(urlparse(self.path).path).split("/") if p]
@@ -330,7 +373,7 @@ class BoardHandler(BaseHTTPRequestHandler):
         body = self.rfile.read(n)            # exactly n: HTTP/1.1 keeps the connection
         try:
             doc = json.loads(body)
-        except json.JSONDecodeError:
+        except (json.JSONDecodeError, UnicodeDecodeError):
             return self._error(400, "body must be JSON")
         if not isinstance(doc, dict):
             return self._error(400, "body must be a JSON object")
@@ -356,26 +399,12 @@ class BoardHandler(BaseHTTPRequestHandler):
             validate_clan_attachment(att, clan_catalog(self.home))
         except ValueError as e:
             return self._error(422, str(e))
-        # the page is not the guard: an approval must supersede the newest
-        # proposal on this channel, or a second tab (or curl) lands a stale
-        # clan.toml — same rule and wording as `clan approve`. Proposals
-        # are trusted only from the orchestrator (it runs `clan propose`);
-        # a role cannot kill the operator's Confirm with a rogue one.
         bus = Bus(self.home, ch)
-        proposed = [m["id"] for m in bus.read_all()
-                    for a in m.get("attachments") or []
-                    if m["from"] == "orchestrator"
-                    and isinstance(a, dict) and a.get("type") == "clan"
-                    and a.get("status") == "proposed"]
-        if not proposed:
-            return self._error(422, "no proposed clan proposal on the bus — "
-                                    "an approval must supersede the newest proposal")
-        newest = proposed[-1]
-        if att.get("supersedes") != newest:
-            return self._error(422, f"attachment supersedes {att.get('supersedes')!r} "
-                                    f"but the newest proposed clan message is {newest!r} — "
-                                    "approve the newest proposal")
-        msg = bus.post("stakeholder", text, parent=parent, attachments=[att])
+        try:
+            msg = bus.post("stakeholder", text, parent=parent, attachments=[att],
+                           expected_proposal=att.get("supersedes"))
+        except ValueError as e:
+            return self._error(409 if "already approved" in str(e) else 422, str(e))
         return self._json({"id": msg["id"]}, 201)
 
     def _channel_summaries(self) -> list[dict]:
@@ -405,11 +434,8 @@ class BoardHandler(BaseHTTPRequestHandler):
         `checkout` is only ever rendered as text. A channel with no clan (or a
         broken one) keeps its row with null metadata."""
         bus = Bus(self.home, ch, read_only=True)   # a GET must not touch the bus mtime
-        msgs = bus.read_all()                 # one pass: the count and the ordering key
-        # read_all's contract gives every message a dict and a str id, so the
-        # last line is safe to index and last_id is a str; `ts` is not part of
-        # that contract, so it keeps its own check.
-        last = msgs[-1] if msgs else {}
+        summary = bus.summary()
+        last = summary['last']
         last_id = last.get("id")
         last_ts = last.get("ts") if isinstance(last.get("ts"), str) else None
         cfg = self._clan_config(ch)
@@ -422,7 +448,7 @@ class BoardHandler(BaseHTTPRequestHandler):
             repo, issue = _safe_repo(cfg.repo), cfg.issue
             checkout = state.get("checkout") or cfg.checkout
             created = state.get("created")
-        return {"name": ch, "agents": bus.presence(), "count": len(msgs),
+        return {"name": ch, "agents": bus.presence(), "count": summary["count"],
                 "last_id": last_id, "last_ts": last_ts,
                 "repo": repo, "issue": issue, "checkout": checkout, "created": created}
 
@@ -441,9 +467,14 @@ class BoardHandler(BaseHTTPRequestHandler):
             return {"roles": []}                  # no clan here (yet), or a drifted one
 
     def _state_snapshot(self, ch: str) -> tuple[dict, bool]:
-        """A non-blocking shared read of `clan.state.json`, falling back to the
+        """Read committed SQLite state, or legacy JSON without blocking on flock.
+
+        Legacy reads fall back to the
         last snapshot served for this channel with `stale=True` when a writer
         holds the lock. Reads never write."""
+        paths = ClanPaths(self.home, ch)
+        if state_revision(paths) is not None:
+            return read_state(paths), False
         store = self.server.snapshots
         try:
             state = _read_state_nb(ClanPaths(self.home, ch).state_json)
@@ -490,8 +521,14 @@ class BoardHandler(BaseHTTPRequestHandler):
     def _file(self, ch: str, name: str):
         if not CHANNEL_RE.match(ch):
             return self._error(400, "bad channel")
-        files_dir = (self.home / "channels" / ch / "files").resolve()
-        target = (files_dir / name).resolve()
+        try:
+            validate_name(ch)
+            if any(ord(c) < 32 or ord(c) == 127 for c in name):
+                raise ValueError("bad filename")
+            files_dir = channel_path(self.home, ch, "files")
+            target = confined(files_dir, name)
+        except ValueError:
+            return self._error(403, "forbidden")
         if files_dir not in target.parents:
             return self._error(403, "forbidden")
         if not target.is_file():
@@ -523,25 +560,12 @@ class BoardHandler(BaseHTTPRequestHandler):
         self.end_headers()
 
         def emit(event: str, data) -> None:
-            self.wfile.write(f"event: {event}\ndata: {json.dumps(data)}\n\n".encode())
+            event_id = f"id: {data['id']}\n" if event == "message" else ""
+            self.wfile.write(f"event: {event}\n{event_id}data: {json.dumps(data)}\n\n".encode())
             self.wfile.flush()
 
+        cursor = bus.tip() if since is None else since
         emit("hello", {"presence": bus.presence()})
-
-        def bus_size(default: int) -> int:
-            """The bus size, or `default` when the file has vanished under the
-            stream — a missing bus is empty and unchanged, the same rule
-            `read_all` uses."""
-            try:
-                return bus.bus_path.stat().st_size
-            except FileNotFoundError:
-                return default
-
-        if since is not None:
-            offset = 0
-            # replay everything after `since` by tailing from byte 0 and filtering below
-        else:
-            offset = bus_size(0)
         last_presence = last_ping = time.monotonic()
         clan_sig = _clan_signature(self.home, bus.channel)   # emit on change only
         while not self.server.stop.is_set():
@@ -552,32 +576,9 @@ class BoardHandler(BaseHTTPRequestHandler):
                 # the expensive work once per client and turn an exception into a
                 # dropped stream. The client refetches, coalesced.
                 emit("clan", {"sig": sig, "at": now_iso()})
-            size = bus_size(offset)
-            if size > offset:
-                with open(bus.bus_path, "rb") as f:
-                    f.seek(offset)
-                    chunk = f.read(size - offset)
-                complete = chunk.rfind(b"\n") + 1
-                for raw in chunk[:complete].splitlines():
-                    try:
-                        msg = json.loads(raw)
-                    except json.JSONDecodeError:
-                        continue
-                    # this tail reads the file itself, so it repeats read_all's
-                    # contract via the one shared predicate: a line that is not
-                    # a message is never compared against `since` or streamed
-                    if not is_message(msg):
-                        continue
-                    if since is not None and msg["id"] <= since:
-                        continue
-                    emit("message", msg)
-                offset += complete
-            elif size < offset:
-                # rotated or recreated: the file is new content, read it from
-                # the top. Adopting `size` here skipped everything already in
-                # the new file and the stream went silent until it outgrew
-                # the old offset.
-                offset = 0
+            for msg in bus.read_since(cursor, limit=200):
+                emit("message", msg)
+                cursor = msg["id"]
             now = time.monotonic()
             if now - last_presence >= 10:
                 emit("presence", {"presence": bus.presence()})

@@ -9,11 +9,15 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import subprocess
+import sys
 import time
+from datetime import datetime
 from pathlib import Path
 from typing import Any, Callable
 
+from .terminal import scrubbed_env as scrubbed_env
 from .tools import require_binary
 
 # Every failure a live zellij subprocess can produce: non-zero exit (ValueError
@@ -21,45 +25,6 @@ from .tools import require_binary
 ZELLIJ_ERRORS = (ValueError, OSError, subprocess.TimeoutExpired)
 
 CONFIG_KDL = 'session_serialization false\nshow_startup_tips false\ndefault_shell "/bin/sh"\n'
-ZELLIJ_VARS = ("ZELLIJ", "ZELLIJ_SESSION_NAME", "ZELLIJ_PANE_ID")
-CLAUDE_IDENTITY_VARS = ("CLAUDECODE", "CLAUDE_PID")
-# The CLAUDE_CODE_* members that mark a child session. The family also holds
-# provider configuration a tab may need — USE_BEDROCK / USE_VERTEX /
-# SKIP_*_AUTH / MAX_OUTPUT_TOKENS survive — so identity is dropped by name and
-# by any *other* CLAUDE_CODE_ var carrying one of these leak words.
-_CLAUDE_CODE_IDENTITY = {"CLAUDE_CODE_SESSION_ID", "CLAUDE_CODE_CHILD_SESSION",
-                         "CLAUDE_CODE_BRIDGE_SESSION_ID", "CLAUDE_CODE_MESSAGING_SOCKET",
-                         "CLAUDE_CODE_MESSAGING_TOKEN", "CLAUDE_CODE_ENTRYPOINT",
-                         "CLAUDE_CODE_EXECPATH"}
-_CLAUDE_CODE_LEAK_WORDS = ("SESSION", "MESSAGING", "CHILD", "PID")
-
-
-def _is_parent_identity(k: str) -> bool:
-    """Zellij vars would address the wrong server; the Claude identity vars
-    mark the tab as a child of whoever launched the clan, so it never writes
-    its own transcript. HOME stays: it is auth. Provider configuration inside
-    CLAUDE_CODE_* stays too — it is not identity."""
-    if k in ZELLIJ_VARS or k in CLAUDE_IDENTITY_VARS:
-        return True
-    if not k.startswith("CLAUDE_CODE_"):
-        return False
-    return k in _CLAUDE_CODE_IDENTITY or any(w in k for w in _CLAUDE_CODE_LEAK_WORDS)
-
-
-def scrubbed_env(parent: dict[str, str] | None = None) -> dict[str, str]:
-    """Production: drop this pane's identity, keep everything else.
-
-    A clan launched from inside a zellij pane must not inherit that pane's
-    ZELLIJ_* vars, or the new session's commands address the old server — and
-    one launched from inside a Claude session must not inherit its parent's
-    session identity, or the role tabs are child sessions with no transcripts
-    of their own (measured on a live clan). HOME stays real — claude and
-    opencode read ~/.claude and ~/.config/opencode for their credentials, and
-    a tab without them is a tab that cannot start.
-    """
-    return {k: v for k, v in (parent if parent is not None else os.environ).items()
-            if not _is_parent_identity(k)}
-
 
 def isolated_env(tmp: Path | str, parent: dict[str, str] | None = None) -> dict[str, str]:
     """Tests: a zellij server nobody else can see.
@@ -187,3 +152,131 @@ class Zellij:
 
     def dump_screen(self, pane: int, full: bool = False) -> str:
         return self._action("dump-screen", "-p", str(pane), *(["-f"] if full else []))
+
+
+SOCKET_PATH_MAX = 103          # a unix socket path caps here; measured on zellij 0.44.1
+SESSION_STAMPS = ("%m%d-%H%M", "%H%M")   # tried in order: our stamp is the cheapest thing to lose
+MIN_CHANNEL_CHARS = 4          # below this a truncated name says nothing
+SESSION_TRIES = 100
+
+
+_CS_DARWIN_USER_TEMP_DIR = 65537   # confstr(3): the per-user /var/folders/.../T dir
+
+
+def _darwin_temp_dir() -> str:
+    """macOS's per-user temp dir, which is what `$TMPDIR` normally holds."""
+    if sys.platform != "darwin":
+        return ""
+    try:
+        return os.confstr(_CS_DARWIN_USER_TEMP_DIR) or ""
+    except (ValueError, OSError):
+        return ""
+
+
+def _socket_prefix(tmp: str) -> int:
+    return len(f"{tmp.rstrip('/')}/zellij-{os.getuid()}/contract_version_1/".encode())
+
+
+def session_name_budget(env: dict[str, str] | None = None) -> int:
+    """How many characters a zellij session name may have on this machine.
+
+    zellij binds its IPC socket at `$TMPDIR/zellij-<uid>/contract_version_1/<session>`,
+    and a unix socket path caps at 103 bytes. On macOS `$TMPDIR` alone is ~49
+    bytes, which leaves about 24 characters for the whole session name — a
+    stamped `<repo>-<issue>` name overruns it and zellij refuses to start.
+
+    `TMPDIR` set is taken at its word: zellij uses what it is given, and a
+    short one must not be second-guessed into shortening names for nothing.
+    Unset, we cannot see what zellij will resolve — Python would say `/tmp`
+    while zellij's process may well have the 49-byte per-user dir — so budget
+    for the longest it could be. `budget_from_error` corrects either way.
+    """
+    env = os.environ if env is None else env
+    tmp = env.get("TMPDIR")
+    if tmp:
+        return SOCKET_PATH_MAX - _socket_prefix(tmp)
+    return SOCKET_PATH_MAX - max(_socket_prefix(d) for d in ("/tmp", _darwin_temp_dir() or "/tmp"))
+
+
+SOCKET_TOO_LONG = re.compile(r"socket path is too long \((\d+) bytes, max (\d+)\)")
+
+
+def budget_from_error(message: str, name: str) -> int | None:
+    """The exact budget, taken from zellij's own arithmetic in its refusal.
+
+    Predicting the socket path means guessing at zellij's layout and at what
+    `$TMPDIR` its process sees. When it refuses it states both numbers, and
+    subtracting the name we sent gives the prefix it actually used. None when
+    the message is some other failure.
+    """
+    m = SOCKET_TOO_LONG.search(message)
+    if not m:
+        return None
+    used, cap = int(m.group(1)), int(m.group(2))
+    return cap - (used - len(name.encode()))
+
+
+def _fit(channel: str, suffix: str, budget: int) -> str | None:
+    """`channel + suffix`, trimming the channel's HEAD when the pair is over
+    budget. The head is what goes: the tail carries the issue number, which is
+    what tells two clans on one repo apart. None when nothing legible fits."""
+    room = budget - len(suffix)
+    if room < MIN_CHANNEL_CHARS:
+        return None
+    return (channel if len(channel) <= room else channel[-room:]) + suffix
+
+
+def unique_session(channel: str, taken: Callable[[str], bool],
+                   now: datetime | None = None, budget: int | None = None) -> str:
+    """A zellij session name for `channel` that nothing on the server holds.
+
+    The channel keeps its stable `<repo>-<issue>` name — it is the bus, the
+    board's identity and what `--channel` addresses — while the zellij session
+    it runs in is stamped with the local start time. They are no longer the
+    same string: a clan that exited still owns its session name (zellij lists
+    EXITED sessions for `attach` to resurrect), and a restart on the same issue
+    must not be refused because its predecessor is still listed.
+
+    The name must also fit `session_name_budget()`. Order of sacrifice: the
+    stamp's date first (`0910-2041` → `2041`), the channel's head last.
+    """
+    now = now or datetime.now()
+    budget = session_name_budget() if budget is None else budget
+    stamps = [now.strftime(f) for f in SESSION_STAMPS]
+    for i, stamp in enumerate(stamps):
+        whole = len(channel) + 1 + len(stamp) <= budget
+        if not whole and i < len(stamps) - 1:
+            continue               # a shorter stamp beats a truncated channel
+        for n in range(1, SESSION_TRIES + 1):
+            suffix = f"-{stamp}" if n == 1 else f"-{stamp}-{n}"
+            name = _fit(channel, suffix, budget)
+            if name is None:
+                break
+            if not taken(name):
+                if name != f"{channel}{suffix}":
+                    print(f"ratel clan: session name shortened to {name!r} — "
+                          f"a zellij socket path caps at {SOCKET_PATH_MAX} bytes",
+                          file=sys.stderr)
+                return name
+    if _fit(channel, f"-{stamps[-1]}", budget) is None:
+        sys.exit(f"ratel clan new: $TMPDIR is too long to name a session under it "
+                 f"({budget} characters left of the {SOCKET_PATH_MAX}-byte socket path "
+                 f"cap) — set a shorter TMPDIR")
+    sys.exit(f"ratel clan new: no free session name after {SESSION_TRIES} tries "
+             f"for channel {channel!r} — `zellij list-sessions` and clean up")
+
+
+def create_session(channel: str, env: dict, factory=Zellij) -> Zellij:
+    held = factory(channel, env=env).sessions()
+    name = unique_session(channel, held.__contains__, budget=session_name_budget(env))
+    terminal = factory(name, env=env)
+    try:
+        terminal.create_background()
+    except ValueError as exc:
+        budget = budget_from_error(str(exc), name)
+        if budget is None:
+            raise
+        name = unique_session(channel, held.__contains__, budget=budget)
+        terminal = factory(name, env=env)
+        terminal.create_background()
+    return terminal

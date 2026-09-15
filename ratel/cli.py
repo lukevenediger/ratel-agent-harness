@@ -11,10 +11,13 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import sqlite3
 import sys
+import time
 from typing import Any
 
 from .bus import Bus, default_home
+from .legacy import migrate
 from .ops import AgentOps
 
 PROG = "ratel"
@@ -34,7 +37,7 @@ def _ops(args: argparse.Namespace) -> AgentOps:
         sys.exit(f"{PROG}: set AGENT_NAME or pass --agent")
     if not channel:
         sys.exit(f"{PROG}: set CHANNEL or pass --channel")
-    return AgentOps(Bus(default_home(), channel), agent)
+    return AgentOps(Bus(args.home or default_home(), channel), agent)
 
 
 def _attachments(ops: AgentOps, args: argparse.Namespace) -> list[dict]:
@@ -50,6 +53,7 @@ def _attachments(ops: AgentOps, args: argparse.Namespace) -> list[dict]:
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog=PROG, description=__doc__.splitlines()[0])
     common = argparse.ArgumentParser(add_help=False)
+    common.add_argument("--home", help="overrides RATEL_HOME")
     common.add_argument("--agent", help="overrides AGENT_NAME")
     common.add_argument("--channel", help="overrides CHANNEL")
     common.add_argument("--pretty", action="store_true", help="indent the JSON output")
@@ -86,15 +90,77 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("path")
     p.add_argument("--name", help="name to show instead of the file's own")
 
+    sub.add_parser("demo", parents=[common], help="seed synthetic data in a new explicit --home directory")
+    sub.add_parser("migrate", parents=[common],
+                   help="import a stopped legacy channel into SQLite; retains original files")
+    sub.add_parser("migrate-state", parents=[common], help="import stopped clan JSON state into SQLite")
+    for command in ('archive', 'retain'):
+        p = sub.add_parser(command, parents=[common], help='offline maintenance; dry run unless --apply')
+        p.add_argument('--destination', help='new archive directory outside channel storage')
+        p.add_argument('--apply', action='store_true', help='create verified backup and apply the operation')
+        p.add_argument('--older-than-days', type=float, default=30, help='orphan minimum age; default 30')
+    sub.add_parser("doctor", parents=[common], help="read-only configuration and runtime checks")
+    sub.add_parser("diagnostics", parents=[common],
+                   help="count malformed messages and cursors without modifying storage")
+    sub.add_parser("export", parents=[common], help="write channel messages as JSONL without advancing cursors")
+    p = sub.add_parser("tail", parents=[common], help="follow channel messages as JSONL without advancing cursors")
+    p.add_argument("--since", help="replay after this message id before following")
+
     from .clan.cli import add_parser as add_clan_parser
     add_clan_parser(sub)
     return parser
 
 
 def run(args: argparse.Namespace) -> Any:
+    if args.cmd == "demo":
+        from .demo import seed
+        if not args.home:
+            raise ValueError('demo requires --home pointing to a new directory')
+        return seed(args.home, args.channel or 'harbor-demo')
     if args.cmd == "clan":
         from .clan.cli import run as clan_run
         return clan_run(args)
+    if args.cmd in ('archive', 'retain'):
+        from .retention import maintain
+        channel = args.channel or os.environ.get('CHANNEL')
+        if not channel:
+            raise ValueError('set CHANNEL or pass --channel')
+        return maintain(args.home or default_home(), channel, days=args.older_than_days,
+                        destination=args.destination, apply=args.apply, retain=args.cmd == 'retain')
+    if args.cmd == "doctor":
+        from .doctor import diagnose
+        return diagnose(args.home or default_home(), args.channel or os.environ.get("CHANNEL"))
+    if args.cmd == "migrate-state":
+        from .clan.config import ClanPaths
+        from .clan.state import migrate as migrate_state
+        channel = args.channel or os.environ.get("CHANNEL")
+        if not channel:
+            raise ValueError("set CHANNEL or pass --channel")
+        return migrate_state(ClanPaths(args.home or default_home(), channel))
+    if args.cmd in ("migrate", "export", "tail", "diagnostics"):
+        channel = args.channel or os.environ.get("CHANNEL")
+        if not channel:
+            raise ValueError("set CHANNEL or pass --channel")
+        bus = Bus(args.home or default_home(), channel, read_only=True)
+        if args.cmd == "diagnostics":
+            return bus.diagnostics()
+        if args.cmd == "migrate":
+            return migrate(bus.channel_dir)
+        cursor = args.since if args.cmd == "tail" else None
+        end = bus.tip() if args.cmd == "export" else None
+        if args.cmd == "export" and end is None:
+            return None
+        while True:
+            msgs = bus.read_since(cursor, limit=200)
+            for msg in msgs:
+                print(json.dumps(msg, ensure_ascii=False), flush=True)
+                cursor = msg["id"]
+                if args.cmd == "export" and cursor == end:
+                    return None
+            if not msgs:
+                if args.cmd == "export":
+                    return None
+                time.sleep(0.5)
     ops = _ops(args)
     if args.cmd == "post":
         text = sys.stdin.read() if args.text == "-" else args.text
@@ -123,10 +189,14 @@ def main(argv: list[str] | None = None) -> None:
     args = build_parser().parse_args(argv)
     try:
         result = run(args)
-    except (ValueError, OSError, json.JSONDecodeError) as e:
+    except (ValueError, OSError, sqlite3.Error) as e:
         sys.exit(f"{PROG} {args.cmd}: {e}")
+    except KeyboardInterrupt:
+        return
     if result is not None:              # `clan launch` execs; `clan watch` blocks
         _emit(result, args.pretty)
+        if args.cmd == "doctor" and not result["ok"]:
+            raise SystemExit(1)
 
 
 if __name__ == "__main__":

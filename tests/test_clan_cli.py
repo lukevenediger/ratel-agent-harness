@@ -171,7 +171,7 @@ def clan(home, *args):
 
 
 def new_clan(home, repo, issue=42, *extra):
-    return clan(home, "new", str(repo), str(issue), *extra)
+    return clan(home, "new", str(repo), str(issue), "--terminal", "zellij", *extra)
 
 
 # ---- new ---------------------------------------------------------------
@@ -213,7 +213,8 @@ def test_new_names_the_channel_after_the_repo_and_issue(home, repo, fake_zellij)
     out = new_clan(home, repo)
     assert out["channel"] == "harbor-42"
     assert out == {"session": out["session"], "channel": "harbor-42",
-                   "attach": f"zellij attach {out['session']}"}
+                   "attach": f"zellij attach {out['session']}",
+                   "terminal_backend": "zellij", "workspace_id": None}
 
 
 def test_new_writes_clan_toml_with_only_the_orchestrator(home, repo, fake_zellij):
@@ -236,7 +237,7 @@ def test_new_opens_the_orchestrator_watch_and_bus_tabs(home, repo, fake_zellij):
     assert orch_argv[2:] == ["ratel.cli", "clan", "launch", "--home", str(home),
                              "--channel", "harbor-42", "orchestrator"]
     assert z.tabs[1][2][-1] == "watch" or "watch" in z.tabs[1][2]
-    assert z.tabs[2][2][0] == "tail" and z.tabs[2][2][-1].endswith("bus.jsonl")
+    assert z.tabs[2][2] == [sys.executable, "-m", "ratel.cli", "tail", "--home", str(home), "--channel", "harbor-42"]
 
 
 def test_new_records_state_the_other_commands_read(home, repo, fake_zellij):
@@ -1309,3 +1310,57 @@ def test_checkpoint_refuses_a_role_checkpointing_itself(home, repo, fake_zellij,
     monkeypatch.setenv("AGENT_NAME", "someone-else")           # only the same name is refused
     rec = clan(home, "checkpoint", "orchestrator", "--mode", "compact", "--channel", "harbor-42")
     assert rec["mode"] == "compact"
+
+
+def test_approval_recovers_interrupted_state_write(home, claned, monkeypatch):
+    from ratel.clan import approval
+    _, msg_id = _approve_msg(home)
+    before = C.read_state(claned)
+    real_update = approval.update_state
+
+    def interrupted(*args, **kwargs):
+        real_update(*args, **kwargs)  # transaction must roll this state update back
+        raise OSError('simulated interruption')
+
+    monkeypatch.setattr(approval, 'update_state', interrupted)
+    with pytest.raises(OSError, match='interruption'):
+        clansession.approve(claned, msg_id)
+    assert C.read_state(claned) == before
+    with pytest.raises(SystemExit, match='pending'):
+        clansession.status(claned)
+    monkeypatch.setattr(approval, 'update_state', real_update)
+    got = clansession.approve(claned, msg_id)
+    state = C.read_state(claned)
+    assert state['checkout'] == before['checkout']
+    assert state['writers'] == {'orchestrator': False, 'developer': True, 'reviewer': False}
+    # Completed applications retain their resolved snapshot even if catalogs break.
+    (home / 'presets.toml').write_text('invalid = [')
+    assert clansession.approve(claned, msg_id) == got
+    with Bus(home, 'harbor-42').store.connection() as con:
+        assert con.execute('SELECT pending FROM approval_applications').fetchall() == [(0,)]
+
+
+def test_down_dirty_preflight_preserves_session_and_state(home, repo, fake_zellij):
+    new_clan(home, repo)
+    add_roles(home, 'harbor-42', {'developer': {}})
+    clan(home, 'up', '--channel', 'harbor-42')
+    paths = C.ClanPaths(home, 'harbor-42')
+    before = C.read_state(paths)
+    worktree = repo.parent / 'harbor-wt' / '42-developer'
+    (worktree / 'unsaved.txt').write_text('keep me')
+    with pytest.raises(SystemExit, match='uncommitted'):
+        clan(home, 'down', '--channel', 'harbor-42', '--prune-worktrees')
+    assert C.read_state(paths) == before
+    assert not FakeZellij.servers[before['session']]['killed']
+    assert (worktree / 'unsaved.txt').read_text() == 'keep me'
+    clan(home, 'down', '--channel', 'harbor-42', '--prune-worktrees', '--force')
+    assert not worktree.exists()
+
+
+def test_down_refuses_redirected_worktree_even_with_force(home, repo, fake_zellij):
+    new_clan(home, repo)
+    paths = C.ClanPaths(home, 'harbor-42')
+    C.update_state(paths, lambda s: s.update(tabs={'orchestrator': {'worktree': str(repo)}}))
+    with pytest.raises(SystemExit, match='expected layout'):
+        clan(home, 'down', '--channel', 'harbor-42', '--prune-worktrees', '--force')
+    assert (repo / 'README.md').exists()

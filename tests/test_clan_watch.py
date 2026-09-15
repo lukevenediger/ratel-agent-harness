@@ -335,7 +335,7 @@ def test_the_watcher_never_touches_agent_cursors(watcher):
         bus.post("developer", f"round {i} done")
         clock.tick(30)
         w.once()
-    assert list((paths.channel_dir / "cursors").iterdir()) == []
+    assert bus.presence() == []
     assert set(C.read_state(paths)) == {"tabs", "watch"}      # it writes only its own key
 
 
@@ -752,3 +752,16 @@ def test_compact_never_touches_an_awaiting_role(home):
     w.zellij.screens[2] = DIALOG
     w.once()
     assert calls == [] and 2 not in measures
+
+
+
+def test_budget_stopped_role_is_not_nudged_or_escalated(watcher):
+    w, bus, paths, z, clock = watcher
+    bus.post('orchestrator', '@developer do work')
+    w.once()
+    z.sent.clear()
+    C.update_state(paths, lambda s: s.update(runs={'developer': {'reason': 'max_failures'}}))
+    clock.tick(3600)
+    bus.post('reviewer', '@developer try again')
+    w.once()
+    assert not z.sent

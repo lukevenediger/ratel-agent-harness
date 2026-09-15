@@ -1,6 +1,6 @@
 # Architecture
 
-ratel is three small processes sharing one directory of files. This document describes the
+ratel is a set of small processes sharing a directory with one SQLite database per channel. This document describes the
 pieces, the on-disk format, the message schema, the tool semantics, and the security boundary.
 Design rationale lives in [DECISIONS.md](DECISIONS.md).
 
@@ -30,14 +30,16 @@ Module map:
 | File | Responsibility |
 |---|---|
 | `ratel/ulid.py` | 26-char ULID ids, monotonic within a process |
-| `ratel/bus.py` | `Bus`: post/read, cursors + presence, threads, pins, attachments, wait, attachment normalization |
+| `ratel/bus.py` | `Bus`: channel operations, presence, attachments, waiting and read-only legacy routing |
+| `ratel/storage.py` | SQLite schema, append sequences, indexed reads, pin state and atomic cursor operations |
+| `ratel/legacy.py` | Read-only JSONL compatibility and explicit offline import |
 | `ratel/ops.py` | `AgentOps`: per-agent semantics (own posts not echoed, cursor advance rules, catch_up) |
 | `ratel/mcp_server.py` | `build_server(bus, agent)`: one MCP tool per `AgentOps` method; `main()` reads env |
 | `ratel/cli.py` | argparse front-end over `AgentOps`; one JSON value per invocation |
 | `ratel/unread.py` | hook: render unread as text, advance cursor |
 | `ratel/board.py` | `ThreadingHTTPServer`: routes, SSE loop, file allowlist, unfurl endpoint |
 | `ratel/unfurl.py` | GitHub PR/issue and Google Doc unfurls, TTL cache, never raises |
-| `ratel/static/board.html` | The whole UI: inline CSS + JS, no build step. One vendored asset beside it (`static/mermaid.min.js`, pinned in `static/VENDOR.md`), loaded lazily from `/static/` and only when a diagram needs it |
+| `ratel/static/board.html` | UI markup and CSS; ordered state/render/network JavaScript sources are assembled inline, no build step. One vendored asset beside it (`static/mermaid.min.js`, pinned in `static/VENDOR.md`), loaded lazily from `/static/` and only when a diagram needs it |
 
 ## On-disk layout
 
@@ -45,36 +47,60 @@ Module map:
 $RATEL_HOME/            default ~/.ratel — outside every repo
   channels/
     <channel>/
-      bus.jsonl             append-only; one JSON object per line, every message and reply
-      cursors/<agent>.json  {"last_read": "<id>", "ts": "<iso>"}; written under fcntl.flock
+      channel.sqlite3       messages, append sequence, cursors and current pins
+      channel.sqlite3-wal   SQLite-managed WAL (may exist while connections are open)
+      channel.sqlite3-shm   SQLite-managed coordination (may exist)
+      bus.jsonl             retained legacy input after explicit migration, never dual-written
+      cursors/<agent>.json  retained legacy input after migration
       files/                attachments by ref; ULID-prefixed names, flat (no subdirs)
       plans/                orchestrator-owned markdown plans (the source of truth for task lists)
 ```
 
-A channel exists when its `bus.jsonl` exists. The board lists channels by scanning this directory;
-nothing registers a channel — the first `Bus(home, channel)` creates it.
+A channel exists when `channel.sqlite3` or a legacy `bus.jsonl` exists. New channels use
+SQLite. The board reads unmigrated channels without creating a database. A writer opening
+an unmigrated channel fails with the migration command rather than silently changing storage.
 
-### Write path
+### Transactions and delivery order
 
-`Bus.post` builds the message, normalizes attachments, fits it under 4000 bytes, and appends one
-line with `O_WRONLY | O_APPEND`. Lines under `PIPE_BUF` (4096) are appended atomically by the
-kernel, so concurrent writers from different processes never interleave and there is no lock on the
-bus file. Anything larger than the budget spills: `code` attachment bodies become files in `files/`,
-then the text itself is written to `files/<id>.md` and truncated in the line with a `file`
-attachment pointing at the full copy.
+`storage.py` owns schema version 3 (`PRAGMA user_version`). `messages` stores a unique public
+ULID, indexed parent ID, full JSON message and an `INTEGER PRIMARY KEY AUTOINCREMENT` sequence.
+The sequence defines append order; ULIDs only identify messages. `since` resolves the public
+ID to its sequence. An unknown cursor replays from the beginning, preferring duplicates to
+loss. `cursors` stores the last consumed sequence and presence timestamp. `pins` stores the
+current pinned set, updated in the same transaction as the message carrying the pin action.
 
-### Read path
+Agent posting performs the tip check, insertion and optional cursor advance under one
+`BEGIN IMMEDIATE` transaction. Reading for an agent selects a batch and advances its cursor
+under the same lock. Cursor advancement uses SQL `max`, including presence-only touches, so
+an older concurrent operation cannot rewind progress. A failed mention predicate does not
+advance the cursor. Posting directly through Bus does not change an agent cursor unless the
+caller explicitly requests agent-post semantics.
 
-Readers parse `bus.jsonl` from the top every time (`read_all`). A trailing line without `\n` is a
-write in progress and is skipped. There is no index; the file is small for months of coordination
-traffic, and the board's SSE loop tails by byte offset rather than re-parsing.
+SQLite WAL permits readers alongside a writer on local disk. Each call owns its connection;
+connections are never shared across threads/processes or held across sleeps/network writes.
+Lock waits are bounded to five seconds; WAL initialization also retries immediate busy errors
+for at most five seconds. The default SQLite durability settings are retained. Database errors
+are surfaced rather than dropping writes. Attachment bytes remain files, named with full ULIDs
+and opened exclusively; a collision fails instead of overwriting. Full message/code text stays
+in SQLite with no artificial 4 KB spill/truncation rule.
 
-### Cursors and presence
+### Compatibility and migration
 
-Each agent has one cursor file: the id of the last message it has consumed, plus a timestamp.
-Reads use `fcntl.flock(LOCK_SH)`, writes `LOCK_EX`. Presence is derived from the cursor
-timestamp: an agent is "online" if its cursor was touched in the last five minutes. Every tool
-call touches the cursor, so presence reflects *reading*, not liveness.
+`ratel migrate --channel NAME` imports legacy messages in file order and maps known cursor IDs
+to that order. It reports skipped malformed/torn lines, preserves the originals, and aborts on
+duplicate IDs. The import is built in a temporary database and published only after a complete
+transaction; publication refuses to replace an existing database. Migration is explicitly
+offline: stop all old writers, migrate, and restart all of them using the new binary. Never
+resume an old JSONL writer beside a migrated database. A repeated migration is refused.
+
+`ratel export` emits JSONL without advancing cursors; `ratel tail` follows committed messages
+through Bus. See [cli-contract.md](cli-contract.md#storage-and-migration) for backup and rollback.
+
+### Presence
+
+Presence is derived from each cursor's timestamp, with a five-minute default window. It
+indicates recent channel interaction, not process liveness. Read-only board requests do not
+advance cursors or mutate messages; SQLite may manage its own WAL/shared-memory sidecars.
 
 ## Message schema
 
@@ -93,7 +119,7 @@ call touches the cursor, so presence reflects *reading*, not liveness.
 
 | Field | Notes |
 |---|---|
-| `id` | ULID; lexicographic order is time order, so `since` comparisons are string comparisons |
+| `id` | Public ULID identity; `since` resolves it to database append order |
 | `ts` | UTC, milliseconds, `Z` suffix |
 | `from` | `AGENT_NAME` of the poster. The human never posts |
 | `text` | Markdown. Inline code, fences, links, checklists, `@mentions` |
@@ -103,7 +129,7 @@ call touches the cursor, so presence reflects *reading*, not liveness.
 | `pin` | `false`, `true` (pins this message), or a message id (pins that message) |
 | `unpin` | Optional; a message id to unpin |
 
-There is no `kind` field. Pins are replayed from the log in order to compute the current pinned set.
+There is no `kind` field. Pin actions remain in message history; their current state is maintained transactionally.
 
 ### Attachments
 
@@ -144,17 +170,19 @@ token-gated write route (the clan-approval POST — the request contract lives i
 | Route | Returns |
 |---|---|
 | `GET /` | `board.html` (with frame-busting CSP / `X-Frame-Options` / `Referrer-Policy` headers — the page holds the write token) |
-| `GET /api/channels` | Every channel with presence and message count (parses each bus in full — call on load and switch, never on a timer) |
-| `GET /api/channels/{ch}/messages?since=&limit=` | Messages and the current pins |
+| `GET /api/channels` | Every channel with presence, stored-message count and tip (SQLite summary queries; legacy JSONL scans) |
+| `GET /api/channels/{ch}/messages?since=&limit=` | Messages and the current pins (agent-compatible API) |
+| `GET /api/channels/{ch}/history?before=&limit=&q=&mention=&operator=` | Latest matching page, exclusive older-page cursor and snapshot tip; default 100, maximum 200 |
+| `GET /api/channels/{ch}/pins` | Pins plus trusted proposal/approval heads, independently of loaded history |
 | `GET /api/channels/{ch}/thread/{id}` | Parent and replies |
-| `GET /api/channels/{ch}/events?since=` | SSE: `hello` (presence), then `message` per new line, `presence` every 10 s, `: ping` every 15 s. With `since`, replays messages after that id before tailing — this closes the race between the initial fetch and the stream connect |
+| `GET /api/channels/{ch}/events?since=` | SSE: `hello` (presence), then `message` per committed message (with SSE `id`, honoring `Last-Event-ID` on reconnect), `presence` every 10 s, `: ping` every 15 s. With `since`, replays messages after that id before tailing — this closes the race between the initial fetch and the stream connect |
 | `GET /api/channels/{ch}/unfurl?url=` | GitHub PR/issue or Google Doc card data, cached 300 s (30 s for failures) |
 | `GET /files/{ch}/{name}` | Attachment bytes from that channel's `files/` |
 | `GET /static/{name}` | A vendored asset, from an allow-list dict keyed by filename (`mermaid.min.js` only). `immutable` caching — the page asks for `?v=<version>` — plus `nosniff` and `default-src 'none'` on the asset itself. gzip is derived in memory and cached per process, never committed. Deliberately NOT the `/files/` handler: that one serves attacker-named content and carries its own sandboxing CSP |
 | `GET /api/clan/catalog` | The clan/model catalog (`harnesses`, `presets`, `roles`, `models`) — the same object `ratel clan catalog` prints |
 | `POST /api/channels/{ch}/post` | The only write route: `201 {"id"}`, landing the message as `stakeholder`. Bearer token required; the body must carry exactly one `clan` attachment with `status: "approved"` whose `supersedes` names the newest proposed clan message on the channel, validated by the same `validate_clan_attachment` as the CLI — a stale approval 422s, so two open tabs (or curl) cannot land an old clan over a newer proposal |
 
-The page keeps a `Set` of rendered ids and ignores duplicates, refetches pins only when a message
+The page tracks its last ingested ID in append order and keeps a `Set` of rendered ids and ignores duplicates, refetches pins only when a message
 carries a truthy `pin` or an `unpin`, assigns agent colours in first-seen order per channel
 (persisted in `localStorage`), and marks live arrivals with a NEW divider plus a one-time accent
 flash. Dark theme by default; light follows `prefers-color-scheme`. Visual contract:
@@ -208,16 +236,22 @@ Setup and headless field notes: [harness-setup.md](harness-setup.md).
 
 ## Clan layer
 
-`ratel/clan/` turns one channel into a clan: a zellij session with one tab
+`ratel/clan/` turns one channel into a clan: a terminal backend with one tab
 per role, per-role harness configs, and a watcher that types @mentions into
 idle agents' terminals.
 
 | Module | Responsibility |
 |---|---|
-| `clan/config.py` | `clan.toml`, the role catalog (packaged `roles.toml` + user `roles.toml` + clan overrides), the models and **presets** catalogs, `clan.state.json` under `flock` |
+| `clan/config.py` | `clan.toml`, the role catalog (packaged `roles.toml` + user `roles.toml` + clan overrides), the models and **presets** catalogs; state compatibility facade |
+| `clan/state.py` | versioned SQLite runtime state, transactional updates, explicit legacy JSON import |
 | `clan/gitwt.py` | worktrees: writer on `issue-<n>`, reviewers detached at its tip; `extensions.worktreeConfig` |
 | `clan/zellij.py` | thin wrapper over the zellij CLI: session, tabs, `write-chars` nudges, screen dumps |
-| `clan/harness.py` | per-role briefs, `mcp.json`/`settings.json`/`opencode.json`, per-round argv, headless rounds |
+| `clan/terminal.py` | backend contract, operator preference, opaque IDs and supervised lifecycle reporting |
+| `clan/herdr.py` | HerdR CLI adapter: one workspace per clan, shared isolated server per Ratel home, identity checks and observations |
+| `clan/harness.py` | per-role briefs, `mcp.json`/`settings.json`/`opencode.json`, launch facade and policy helpers |
+| `clan/adapters.py` | harness argument construction |
+| `clan/supervision.py` | headless subprocess lifecycle, timeout and failure handling |
+| `clan/output.py` | bounded output tails |
 | `clan/loop.py` | `NudgeLoop`: one nudge line on stdin → one round |
 | `clan/watch.py` | tails the bus, types a mention line into the mentioned role's pane; probes each pane for a permission dialog and posts `@stakeholder` once |
 | `clan/prompts.py` | recognises a harness permission dialog at the bottom of a screen dump |
@@ -230,9 +264,9 @@ Channel-directory additions for a clan channel:
 <channel>/
   clan/clan.toml         the approved clan (roles, models, writer bit) — one level
                          down so the channel root stays out of every role's grant
-  clan.state.json        tool-owned state (session, tabs, pane ids, unattended,
-                         checkout, writer bits + briefs) — agent-reachable, so read AND
-                         write paths filter env keys, and no role may write it
+  channel.sqlite3       messages, cursors, approval intents and versioned clan state
+                         (session, tabs, checkout, writers, briefs and watcher state)
+  clan.state.json        retained legacy state after explicit offline import
   harness/<role>/
     brief.md             the role's brief (channel dir, clan table, unattended line)
     mcp.json             the ratel MCP server for the role
@@ -247,13 +281,35 @@ Channel-directory additions for a clan channel:
 ```
 
 **The nudge path:** a role posts `@developer …` → the bus line lands → the
-watcher (its own tab) reads it with its own cursor → `zellij write-chars` types
+watcher (its own tab) reads it with its own cursor → the terminal backend submits
 the mention line into the idle role's pane + Enter → the headless harness (or
 the interactive agent) treats it as its next prompt. Nudges are keystrokes, not
 polls; agents keep their own cursors and the watcher owns none. The one thing
 the watcher posts is an `@stakeholder` line when a role's pane shows a harness
 permission dialog — the operator's to answer, not the orchestrator's — and the
 role reads `awaiting-operator` until the screen moves on (Decision 41).
+
+HerdR is the default for new clans. The operator's `config.toml` preference and
+`clan new --terminal` select a backend independently of role harness presets.
+SQLite state records `terminal_backend`, session/workspace IDs and per-role terminal
+identity. Missing backend fields mean Zellij, preserving existing clans without migration.
+HerdR identifiers remain strings; legacy Zellij identifiers remain numeric.
+
+The HerdR watcher observes lifecycle state, persists timestamped `watch.terminal`
+snapshots, and holds prompts while working, blocked, unknown or unavailable. The board
+reads snapshots without backend calls; observations older than ten seconds are stale.
+Manual prompts, verdicts, escalations and checkpoint reorientation have a separate
+transactional `terminal_controls` queue so watcher snapshots cannot overwrite new entries.
+Delivery is at least once across an ambiguous timeout or crash; channel message IDs
+and agent cursors remain the coordination authority.
+
+Before input, HerdR's immutable terminal ID and the role process's PID/start time must
+match. Cross-workspace moves are resolved using terminal identity; cold-restored shells
+and replacement processes fail the check. Ratel disables native agent restore in its
+managed HerdR configuration. A shared server failure affects all its clans. Workspace
+ownership limits routine cleanup, and does not provide agent security isolation.
+Headless lifecycle comes from the Ratel supervisor, including its existing run budgets;
+the watcher publishes it to HerdR for display. HerdR `done` is readiness, never a verdict.
 
 **Headless kinds.** An unattended clan runs `claude-p` / `opencode-run` instead
 of the interactive kinds, one fresh process per round: the kickoff round runs
@@ -262,12 +318,98 @@ the role's default prompt, then each nudge line becomes one spawned child
 stdout pumped to the pane while buffered for the record, `wait(timeout=…)` as
 the timeout authority, `killpg` on expiry).
 `--continue`/`-s <session>` resumes only from round 2. Each round's stdout is
-pumped to the pane and appended to `rounds.jsonl`; `CLAN_ROUND_TIMEOUT` (default
+pumped to the pane; bounded stdout/stderr tails are appended to `rounds.jsonl`; `CLAN_ROUND_TIMEOUT` (default
 3600 s) kills a wedged round, and `clan down` killpgs the group a `round.pid`
 ledger names — verified by process start time, so a stale or forged ledger
 cannot kill a bystander. The `--add-dir` set is the file boundary per role
 (`plans/`, `files/`, own harness dir; the orchestrator also `clan/`), and the
-channel root — which holds `clan.state.json` — is excluded from every role's
+channel root — which holds `channel.sqlite3` — is excluded from every role's
 add-dir by design.
 
-`rounds.jsonl` can contain secrets and is never attached to the channel or a PR.
+Output capture retains at most 40 chunks and 65,536 characters per stream. Reads are bounded
+at 4096 characters even without newlines. Session IDs are captured incrementally, independently
+of the retained tail. `CLAN_ROUND_LOG=full` streams full stdout/stderr to exclusive per-round
+files and stores their filenames in the record. `rounds.jsonl` can contain secrets and is never attached to the channel or a PR.
+The same applies to full output logs. Log retention remains an operator responsibility.
+
+Storage safety uses shared structural validation in `schema.py` and channel path containment
+in `paths.py`. Readers skip malformed nested records; `ratel diagnostics` reports counts.
+Channel paths reject symlinks, including database sidecars; the selected home remains trusted.
+These checks are not a sandbox against another process with the same filesystem permissions.
+
+Schema 2 adds `approval_applications`; schema 3 adds `clan_state`. A board decision checks the
+latest proposal under the same write transaction as insertion. Applying it freezes the resolved
+configuration and state snapshot in a committed intent, atomically replaces clan.toml, then
+commits runtime state and intent completion in one SQLite transaction. Lifecycle readers refuse
+pending intents; `clan approve` retries the saved application after interruption. The editable
+TOML file still requires this recovery protocol across the file/database boundary.
+
+Clan-state payload version 1 preserves unknown fields and validates known container shapes.
+WAL readers see committed state while another process writes; a monotonic state revision drives
+board refreshes. Existing JSON state is read-only until explicit offline `migrate-state` import,
+which retains the original. Schema 1/2 databases stay readable and upgrade on writes. Runtime
+state still filters environment keys on read/write paths; same-user filesystem trust is unchanged.
+
+The board page is assembled from `board.html` and ordered `board-state.js`, `board-render.js`,
+and `board-network.js` sources. State/routing, rendering and network orchestration can be edited
+separately while retaining one same-origin page, the existing CSP and no build step.
+`doctor.py` provides read-only structured configuration, storage, binary, credential-presence
+and worktree checks, suppressing credential values and raw exception text.
+
+### Board navigation and request lifetime
+
+A channel selection owns an AbortController and generation number. Initial history, older
+pages, pin and clan refreshes check that generation before changing the view; repeated pin
+and clan requests also have their own counters. Threads own a separate controller/counter
+so closing or switching a thread invalidates pending responses. SSE callbacks additionally
+check the specific EventSource instance, including after manual retry. Connection state
+and fetch failures are visible, with retry actions.
+
+The initial page contains the latest 100 matching messages in append order. Search and
+mention/operator filters run over the full channel history on the server; search is literal
+message text, not an FTS index. SQLite scans candidates backwards and stops after a page
+plus one valid match, bounding materialized results. Sparse searches and proposal-head queries
+can scan farther; legacy JSONL still requires a full file read. Pin and thread reads preserve
+context outside the current window. Replies appear in the timeline and open their parent
+thread. Loading older history prepends rows while preserving the current scroll anchor and
+SSE cursor. DOM size grows only with explicitly loaded pages and live arrivals; there is no
+virtualization or eviction in this phase.
+
+
+### Run budgets and offline maintenance
+
+`clan/budget.py` holds pure limit validation and counters. The supervisor checks them before
+launch and after each result, caps the subprocess deadline by remaining elapsed time, and
+publishes counters/stop codes under SQLite `runs[role]`. Conversation resets leave the budget
+alone. `NudgeLoop` uses a bounded input queue when a deadline is present so an idle terminal
+cannot keep the run alive indefinitely; supervision errors propagate rather than trigger an
+unbounded retry loop. The watcher omits stopped roles, and status/the board display the reason.
+Budgets are per launch, not provider account quotas. Optional Claude spend enforcement is
+passed through to its documented print-mode flag; unsupported harnesses fail explicitly.
+
+`retention.py` implements dry-run `archive` and `retain`. Lifecycle startup clears
+`maintenance_ready`; successful `clan down` sets it after session/round shutdown and clears
+tabs. Maintenance refuses ambiguous clan activity and remaining round ledgers. During apply,
+a SQLite write lock serializes cooperating database writers while a separate read connection
+feeds the SQLite backup API. Stable file inventories, content hashes and database integrity
+checks precede any orphan removal. Archive destinations are exclusive, private directories
+outside channel storage. Referenced files and all messages/configuration/plans/worktrees remain;
+retention only removes old orphan attachments or unreferenced generated full logs. External
+writers must be stopped; the filesystem is not transactionally locked. Restoring means copying
+a verified archive to a new offline channel, never overwriting an active one.
+
+
+### Packaged artifacts and verification
+
+`demo.py` seeds a new explicitly selected home with synthetic messages and attachments through
+Bus. It starts no clan or provider process. The same command runs from a wheel and from a
+checkout. `scripts/verify-wheel.py` builds a wheel, exports frozen production dependencies with
+hashes, installs into a temporary virtualenv outside the checkout, and verifies console entry
+points, catalogs/briefs/dispatch skill, assembled board JavaScript, Mermaid and attachment HTTP
+routes, and MCP stdio. The disposable demo home is removed with the smoke environment.
+
+CI includes Linux and macOS test jobs with explicit Node/Chromium setup from the browser npm
+lockfile. Required browser mode turns missing dependencies into failures. The macOS job also
+runs isolated Zellij integration tests. Ruff, frozen dependency verification and installed-wheel
+checks feed the stable `CI required` aggregate job. Paid/live harness tests remain excluded by
+default. Repository branch protection must select that status check separately.

@@ -8,3 +8,6 @@ dist/
 .env
 .env.*
 !.env.example
+
+# Local browser acceptance runtime
+tests/browser/node_modules/

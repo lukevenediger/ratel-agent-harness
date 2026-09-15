@@ -3,6 +3,13 @@ import json
 from ratel.bus import Bus, extract_mentions
 
 
+def legacy_bus(bus, text):
+    msg = bus.post("a", text)
+    bus.db_path.unlink()
+    bus.bus_path.write_text(json.dumps(msg) + "\n")
+    return Bus(bus.home, bus.channel, read_only=True)
+
+
 def test_extract_mentions_ordered_deduped():
     assert extract_mentions("@worker-a take it, cc @security and @worker-a; mail me@x.com") == ["worker-a", "security"]
 
@@ -10,15 +17,14 @@ def test_extract_mentions_ordered_deduped():
 def test_layout_created(home):
     b = Bus(home, "harbor")
     d = home / "channels" / "harbor"
-    assert (d / "bus.jsonl").exists()
-    assert (d / "cursors").is_dir() and (d / "files").is_dir() and (d / "plans").is_dir()
+    assert (d / "channel.sqlite3").exists()
+    assert (d / "files").is_dir() and (d / "plans").is_dir()
+    assert not (d / "bus.jsonl").exists()
 
 
-def test_post_appends_one_line_with_schema(bus):
+def test_post_persists_message_with_schema(bus):
     m = bus.post("orchestrator", "@worker-a take the auth middleware.")
-    lines = bus.bus_path.read_text().splitlines()
-    assert len(lines) == 1
-    on_disk = json.loads(lines[0])
+    (on_disk,) = bus.read_all()
     assert on_disk == m
     assert set(m) == {"id", "ts", "from", "text", "parent", "mentions", "attachments", "pin"}
     assert m["from"] == "orchestrator" and m["parent"] is None and m["pin"] is False
@@ -35,7 +41,7 @@ def test_read_since_and_limit(bus):
 
 
 def test_read_skips_torn_last_line(bus):
-    bus.post("a", "ok")
+    bus = legacy_bus(bus, "ok")
     with open(bus.bus_path, "a") as f:
         f.write('{"id": "partial')
     assert len(bus.read_all()) == 1
@@ -47,7 +53,7 @@ def test_read_all_drops_lines_that_are_not_messages(bus):
     list (`watch.py`, `pins`, `wait_for_new`, the board), so anything else is
     dropped once here and every caller inherits the guard. Invalid JSON was
     already dropped; this is the same rule for the other malformed shapes."""
-    bus.post("a", "the only real message")
+    bus = legacy_bus(bus, "the only real message")
     with open(bus.bus_path, "a") as f:
         f.write("null\n123\n[]\n"
                 '{"id": 123, "ts": "t", "from": "o", "text": "x", "mentions": []}\n'
@@ -62,18 +68,19 @@ def test_read_all_drops_lines_that_are_not_messages(bus):
 def test_read_all_of_a_missing_bus_is_empty(bus):
     """A read-only `Bus` no longer creates bus.jsonl, so a reader must see an
     empty channel rather than FileNotFoundError."""
-    bus.bus_path.unlink()
+    bus.db_path.unlink()
     assert bus.read_all() == []
 
 
 def test_presence_skips_malformed_cursors(bus):
     """A cursor is agent-adjacent state: valid JSON of the wrong shape must not
     take presence() (and every route that reads it) down."""
-    bus.post("bob", "hi")
+    bus = legacy_bus(bus, "hi")
+    bus.cursors_dir.mkdir()
     for agent, doc in (("a", "[]"), ("b", '"nope"'), ("c", '{"ts": 5}'),
                        ("d", '{"ts": "nope"}'), ("e", "{not json")):
-        bus.cursor_path(agent).write_text(doc)
-    bus.cursor_path("ok").write_text('{"ts": "2026-09-11T00:00:00Z", "last_read": null}')
+        (bus.cursors_dir / f"{agent}.json").write_text(doc)
+    (bus.cursors_dir / "ok.json").write_text('{"ts": "2026-09-11T00:00:00Z", "last_read": null}')
     assert {p["agent"] for p in bus.presence()} == {"ok"}
 
 
@@ -84,25 +91,14 @@ def test_unpin_field_only_when_set(bus):
     assert m2["unpin"] == m["id"]
 
 
-def test_oversize_code_attachment_spills_to_files(bus):
+def test_large_code_and_text_are_preserved(bus):
     body = "x" * 10_000
-    m = bus.post("w", "big diff", attachments=[{"type": "code", "file": "src/a.py", "lang": "py", "body": body}])
-    line = bus.bus_path.read_text().splitlines()[-1]
-    assert len(line.encode()) <= Bus.MAX_LINE
-    (att,) = m["attachments"]
-    assert att["type"] == "file" and att["ref"].startswith("files/") and att["name"] == "src/a.py"
-    assert (bus.channel_dir / att["ref"]).read_text() == body
-
-
-def test_oversize_text_truncates_and_spills(bus):
-    text = "y" * 10_000
-    m = bus.post("w", text)
-    line = bus.bus_path.read_text().splitlines()[-1]
-    assert len(line.encode()) <= Bus.MAX_LINE
-    assert m["text"].endswith("…") and len(m["text"]) < len(text)
-    (att,) = m["attachments"]
-    assert att["mime"] == "text/markdown"
-    assert (bus.channel_dir / att["ref"]).read_text() == text
+    text = '\"\\\n' * 10_000
+    attachment = {"type": "code", "file": "src/a.py", "lang": "py", "body": body}
+    m = bus.post("w", text, attachments=[attachment])
+    assert bus.read_all() == [m]
+    assert m["text"] == text and m["attachments"] == [attachment]
+    assert list(bus.files_dir.iterdir()) == []
 
 
 import threading
@@ -119,7 +115,9 @@ def test_cursor_roundtrip_and_presence(bus):
     assert bus.presence(window_s=0)[0]["online"] is False
 
 
-def test_get_cursor_tolerates_empty_file(bus):
+def test_get_cursor_tolerates_empty_legacy_file(bus):
+    bus = legacy_bus(bus, "hi")
+    bus.cursors_dir.mkdir()
     (bus.cursors_dir / "w.json").write_text("")
     assert bus.get_cursor("w") is None
 
@@ -257,7 +255,7 @@ def test_post_normalizes_attachments(bus):
         {"ref": "01M1V3NZGD-DESIGN.md", "name": "DESIGN.md", "mime": "text/markdown"},
         {"url": "https://example.com"},
     ])
-    on_disk = json.loads(bus.bus_path.read_text().splitlines()[-1])
+    on_disk = bus.read_all()[-1]
     assert [a["type"] for a in on_disk["attachments"]] == ["file", "link"]
     assert on_disk["attachments"][0]["ref"] == "files/01M1V3NZGD-DESIGN.md"
     assert on_disk == m
@@ -266,7 +264,7 @@ def test_post_normalizes_attachments(bus):
 def test_post_rejects_a_shapeless_attachment(bus):
     with pytest.raises(ValueError):
         bus.post("designer", "oops", attachments=[{"name": "mystery"}])
-    assert bus.bus_path.read_text() == ""
+    assert bus.read_all() == []
 
 
 def test_post_rejects_a_parent_that_is_not_a_ulid(bus):

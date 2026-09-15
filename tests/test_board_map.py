@@ -39,7 +39,7 @@ process.stdout.write(JSON.stringify({
 
 
 def run(case, tmp_path):
-    src = BOARD_HTML.read_text()
+    src = board_mod.board_page().decode()
     model = src[src.index(START):src.index(END, src.index(START)) + len(END)]
     script = tmp_path / "map_harness.js"
     script.write_text(HARNESS % {"model": model})

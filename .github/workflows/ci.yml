@@ -7,20 +7,109 @@ on:
 permissions:
   contents: read
 
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
-  test:
-    name: pytest ${{ matrix.python-version }}
+  lint:
+    name: lint
     runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: astral-sh/setup-uv@d0d8abe699bfb85fec6de9f7adb5ae17292296ff # v6
+        with:
+          python-version: "3.12"
+      - run: uv lock --check
+      - run: uv sync --frozen
+      - run: uv run --frozen ruff check .
+      - run: git diff --exit-code -- uv.lock
+
+  test:
+    name: pytest ${{ matrix.os }} Python ${{ matrix.python }}
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 20
     strategy:
       fail-fast: false
       matrix:
-        python-version: ["3.12", "3.13"]
+        include:
+          - os: ubuntu-latest
+            python: "3.12"
+          - os: ubuntu-latest
+            python: "3.13"
+          - os: macos-latest
+            python: "3.14"
+    env:
+      RATEL_HOME: /tmp/ratel-ci-tests
+      RATEL_REQUIRE_BROWSER: "1"
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
-      - uses: astral-sh/setup-uv@d4b2f3b6ecc6e67c4457f6d3e41ec42d3d0fcb86 # v5.4.2
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: astral-sh/setup-uv@d0d8abe699bfb85fec6de9f7adb5ae17292296ff # v6
         with:
-          python-version: ${{ matrix.python-version }}
-      - run: uv sync
-      # zellij, node, llm and headless are auto-skipped or deselected when the
-      # binary or key is absent (tests/conftest.py), so this is hermetic.
-      - run: uv run pytest -q
+          python-version: ${{ matrix.python }}
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: tests/browser/package-lock.json
+      - run: uv sync --frozen
+      - run: npm ci --ignore-scripts --prefix tests/browser
+      - run: npx --prefix tests/browser --no-install playwright install --with-deps chromium
+      - name: Install and require Zellij 0.44.1 on macOS
+        if: runner.os == 'macOS'
+        run: |
+          case "$RUNNER_ARCH" in
+            ARM64) target=aarch64-apple-darwin ;;
+            X64) target=x86_64-apple-darwin ;;
+            *) exit 1 ;;
+          esac
+          curl -fsSL "https://github.com/zellij-org/zellij/releases/download/v0.44.1/zellij-$target.tar.gz" -o "$RUNNER_TEMP/zellij.tar.gz"
+          tar -xzf "$RUNNER_TEMP/zellij.tar.gz" -C "$RUNNER_TEMP" zellij
+          "$RUNNER_TEMP/zellij" --version
+          echo "$RUNNER_TEMP" >> "$GITHUB_PATH"
+      - name: Install and require HerdR 0.9.0
+        shell: bash
+        run: |
+          case "$RUNNER_OS/$RUNNER_ARCH" in
+            Linux/X64) asset=herdr-linux-x86_64 ;;
+            macOS/ARM64) asset=herdr-macos-aarch64 ;;
+            macOS/X64) asset=herdr-macos-x86_64 ;;
+            *) exit 1 ;;
+          esac
+          curl -fsSL "https://github.com/herdrdev/herdr/releases/download/v0.9.0/$asset" -o "$RUNNER_TEMP/herdr"
+          chmod +x "$RUNNER_TEMP/herdr"
+          "$RUNNER_TEMP/herdr" --version
+          echo "$RUNNER_TEMP" >> "$GITHUB_PATH"
+      # Browser launch failure is fatal; local optional-runtime skips cannot
+      # silently remove Chromium coverage from this matrix.
+      - run: uv run --frozen pytest -q --tb=short
+
+  package:
+    name: installed wheel
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    env:
+      RATEL_HOME: /tmp/ratel-ci-package
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: astral-sh/setup-uv@d0d8abe699bfb85fec6de9f7adb5ae17292296ff # v6
+        with:
+          python-version: "3.12"
+      - run: uv sync --frozen
+      - run: uv run --frozen python scripts/verify-wheel.py
+
+  required:
+    name: CI required
+    if: always()
+    needs: [lint, test, package]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Require every verification job
+        env:
+          LINT_RESULT: ${{ needs.lint.result }}
+          TEST_RESULT: ${{ needs.test.result }}
+          PACKAGE_RESULT: ${{ needs.package.result }}
+        run: |
+          test "$LINT_RESULT" = success
+          test "$TEST_RESULT" = success
+          test "$PACKAGE_RESULT" = success

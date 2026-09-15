@@ -3,7 +3,7 @@
 An idle interactive agent is blocked on its own prompt; it does not poll the
 bus. The watcher is what makes `@developer` reach a developer who is sitting
 there waiting. It is not an agent: it keeps its own offset in
-`clan.state.json` and never reads or writes `cursors/`, because those belong
+`clan.state.json` and never updates agent cursors, because those belong
 to the agents and the board's unread and presence are computed from them.
 
 It has one bus write: when a role's pane shows a harness permission dialog
@@ -23,11 +23,12 @@ from datetime import datetime, timezone
 from typing import Any, Callable
 
 from ..bus import Bus, now_iso
-from ..ulid import is_ulid
+from ..ulid import is_ulid, ulid
+from .budget import stopped_reason
 from .config import ClanPaths, read_state, update_state
 from .context import context_tokens
 from .prompts import _CTRL, detect_prompt
-from .zellij import ZELLIJ_ERRORS
+from .terminal import TERMINAL_ERRORS, TerminalId, terminal_id
 
 MENTION = ("ratel: @{role} {n} new on #{channel} from {senders} — call catch_up now, "
            "act on the latest mention, reply in thread {thread}. Do not wait_for_mention.")
@@ -58,12 +59,22 @@ def _one_line(text: str, cap: int = 120) -> str:
 @dataclass
 class Nudge:
     role: str
-    pane: int
+    pane: TerminalId
     text: str
     kind: str = "mention"
     n: int = 1
     senders: list[str] = field(default_factory=list)
     thread: str | None = None
+    control_id: str | None = None
+
+
+def queue_control(paths: ClanPaths, role: str, text: str, key: str | None = None, kind: str = "manual"):
+    key = key or ulid()
+    def add(state):
+        controls = state.setdefault("terminal_controls", {})
+        controls.setdefault(key, {"role": role, "text": text, "kind": kind})
+    update_state(paths, add)
+    return key
 
 
 class Watcher:
@@ -71,12 +82,13 @@ class Watcher:
                  stale_s: float = 600, orchestrator: str = "orchestrator",
                  clock: Callable[[], float] = time.monotonic,
                  measure: Callable[[dict], int | None] | None = None,
-                 measure_every_s: float = 30, thresholds: dict[str, int] | None = None,
+                 measure_every_s: float = 30, thresholds: dict[str, TerminalId] | None = None,
                  checkpoint: Callable[[str, str, str], Any] | None = None,
                  probe_every_s: float = 30):
         self.bus = bus
         self.paths = paths
         self.zellij = zellij
+        self.agent_aware = getattr(zellij, "agent_aware", False) is True
         self.debounce_s = debounce_s
         self.stale_s = stale_s
         self.orchestrator = orchestrator
@@ -95,7 +107,7 @@ class Watcher:
         return MENTION.format(role=role, n=n, channel=self.bus.channel,
                               senders=", ".join(senders), thread=thread)
 
-    def route(self, msgs: list[dict], tabs: dict[str, int]) -> list[Nudge]:
+    def route(self, msgs: list[dict], tabs: dict[str, TerminalId]) -> list[Nudge]:
         """What this batch deserves, delivered by nobody. Mentions fold per role."""
         folded: dict[str, Nudge] = {}
         verdicts: list[Nudge] = []
@@ -105,7 +117,7 @@ class Watcher:
                     and m["from"] != self.orchestrator:
                 verdicts.append(Nudge(
                     role=self.orchestrator, pane=tabs[self.orchestrator], kind="verdict",
-                    thread=thread, senders=[m["from"]],
+                    thread=thread, senders=[m["from"]], control_id=m["id"] + ":verdict",
                     text=VERDICT.format(role=self.orchestrator, sender=m["from"],
                                         verdict=_one_line(m["text"]), thread=thread)))
             for role in m.get("mentions", []):
@@ -121,11 +133,13 @@ class Watcher:
         return list(folded.values()) + verdicts
 
     # ---- stateful -------------------------------------------------------
-    def _tabs(self, state: dict) -> dict[str, int]:
+    def _tabs(self, state: dict) -> dict[str, TerminalId]:
         """Pane ids per role. A `None` recorded on a slow server (`clan new`
         tolerated the pane lag) is re-resolved once and written back."""
         tabs = {}
         for r, v in (state.get("tabs") or {}).items():
+            if stopped_reason(state, r):
+                continue
             pane = v.get("pane_id")
             if pane is None:
                 # The router must outlive a dead server; nudge is the caller
@@ -134,7 +148,7 @@ class Watcher:
                     pane = self.zellij.pane_or_none(r, timeout_s=0.5)
                 except FileNotFoundError:      # a missing binary is never skipped silently
                     raise
-                except ZELLIJ_ERRORS:
+                except TERMINAL_ERRORS:
                     continue
             if pane is None:
                 continue
@@ -144,7 +158,7 @@ class Watcher:
             tabs[r] = pane
         return tabs
 
-    def _stale(self, watch: dict, tabs: dict[str, int]) -> list[Nudge]:
+    def _stale(self, watch: dict, tabs: dict[str, TerminalId]) -> list[Nudge]:
         """A role nudged long ago that has said nothing since: tell the orchestrator, once."""
         out = []
         if self.orchestrator not in tabs:
@@ -154,7 +168,7 @@ class Watcher:
             elapsed = self.clock() - info.get("ts", 0)
             if role == self.orchestrator or info.get("escalated") or elapsed < self.stale_s:
                 continue
-            if role in awaiting:            # blocked on a dialog: the stakeholder's, not the
+            if role not in tabs or role in awaiting:            # blocked on a dialog: the stakeholder's, not the
                 continue                    # orchestrator's — and not silence
             info["escalated"] = True
             out.append(Nudge(role=self.orchestrator, pane=tabs[self.orchestrator], kind="stale",
@@ -216,9 +230,46 @@ class Watcher:
                                  thread=p["thread"],
                                  text=self._mention_text(role, p["n"], p["senders"], p["thread"])))
 
-        self._probe_prompts(watch, tabs, state, now)
+        if self.agent_aware:
+            observations = {}
+            for role, pane in tabs.items():
+                if role in ("watch", "bus"):
+                    continue
+                observations[role] = self.zellij.observe(pane)
+                reporter = getattr(self.zellij, "report_observation", None)
+                if reporter:
+                    try:
+                        reporter(pane, observations[role])
+                    except TERMINAL_ERRORS:
+                        pass  # Display reporting must not change delivery or budgets.
+                status = observations[role]["state"]
+                if status == "blocked" and role not in watch["awaiting"]:
+                    watch["awaiting"][role] = {"at": now_iso(), "kind": "permission",
+                        "text": "HerdR detected an approval or question; inspect the agent terminal."}
+                    self.bus.post(WATCH_SENDER, f"@stakeholder {role} needs attention in its agent terminal.")
+                elif status in ("idle", "done", "working"):
+                    if watch["awaiting"].pop(role, None) is not None and role in watch["nudged"]:
+                        watch["nudged"][role].update(ts=now, at=now_iso())
+            watch["terminal"] = observations
+        else:
+            self._probe_prompts(watch, tabs, state, now)
         sending += self._stale(watch, tabs)
+        if self.agent_aware:
+            for n in sending:
+                if n.kind != "mention":
+                    queue_control(self.paths, n.role, n.text, n.control_id, n.kind)
+            sending = [n for n in sending if n.kind == "mention"]
+            for key, control in read_state(self.paths).get("terminal_controls", {}).items():
+                role = control["role"]
+                if role in tabs:
+                    sending.append(Nudge(role, tabs[role], control["text"],
+                                         kind=control["kind"], control_id=key))
+        delivered_roles = set()
         for n in sending:
+            if self.agent_aware:
+                obs = watch.get("terminal", {}).get(n.role, {})
+                if obs.get("state") not in ("idle", "done") or n.role in delivered_roles:
+                    continue
             # Pane resolution is already defensive (`_tabs`); delivery is not.
             # A killed pane, a stale id or a dead server must cost that one
             # nudge, not the whole watch tab. A missing binary stays loud.
@@ -226,10 +277,14 @@ class Watcher:
                 self.zellij.nudge(n.pane, n.text)
             except FileNotFoundError:
                 raise
-            except ZELLIJ_ERRORS as e:
+            except TERMINAL_ERRORS as e:
                 print(f"ratel clan watch: nudge to {n.role} failed: {e!r} "
                       "(pane gone or server dead) — will retry next tick", file=sys.stderr)
                 continue
+            delivered_roles.add(n.role)
+            if self.agent_aware and n.control_id:
+                update_state(self.paths, lambda s, key=n.control_id:
+                             s.setdefault("terminal_controls", {}).pop(key, None))
             if n.kind != "stale":
                 watch["nudged"][n.role] = {"id": n.thread or "", "ts": now,
                                            "at": now_iso(), "escalated": False}
@@ -243,7 +298,7 @@ class Watcher:
         update_state(self.paths, lambda s: s.__setitem__("watch", watch))
         return sending
 
-    def _probe_prompts(self, watch: dict, tabs: dict[str, int], state: dict, now: float) -> None:
+    def _probe_prompts(self, watch: dict, tabs: dict[str, TerminalId], state: dict, now: float) -> None:
         """Dump each interactive role's pane on a slow cadence and record a
         harness permission dialog under `watch["awaiting"]`. Every up role is
         probed, not only the nudged ones: the orchestrator is never in
@@ -270,7 +325,7 @@ class Watcher:
                 screen = self.zellij.dump_screen(pane)
             except FileNotFoundError:        # a missing binary is never skipped silently
                 raise
-            except ZELLIJ_ERRORS:
+            except TERMINAL_ERRORS:
                 continue                     # pane gone or server dead: this probe, not the tick
             found = detect_prompt(screen)
             if found is None:
@@ -285,8 +340,7 @@ class Watcher:
                 tab_id = tab.get("tab_id")
                 rec = watch["awaiting"][role] = {
                     "at": now_iso(), "ts": now, "kind": found.kind, "family": found.family,
-                    "tab_id": tab_id if isinstance(tab_id, int) and not isinstance(tab_id, bool)
-                    else None,
+                    "tab_id": terminal_id(tab_id),
                     "text": found.text, "escalated": False}
             if not rec.get("escalated"):
                 self.bus.post(WATCH_SENDER, AWAITING.format(
@@ -294,7 +348,7 @@ class Watcher:
                     text=rec["text"]))
                 rec["escalated"] = True
 
-    def _compact_tick(self, watch: dict, tabs: dict[str, int], state: dict, now: float) -> None:
+    def _compact_tick(self, watch: dict, tabs: dict[str, TerminalId], state: dict, now: float) -> None:
         """Measure idle roles; compact through the checkpoint callback when a
         role is over its threshold. `session.watch` wires the callback to
         `session.checkpoint` (the watcher must not import session) — a busy
@@ -305,6 +359,8 @@ class Watcher:
         watch.setdefault("compacted", {})
         for role in tabs:
             if role in ("watch", "bus") or role in watch["pending"] or role in watch["nudged"]:
+                continue
+            if self.agent_aware and watch.get("terminal", {}).get(role, {}).get("state") not in ("idle", "done"):
                 continue
             if role in watch.get("awaiting", {}):   # never type /compact into a dialog
                 continue
@@ -329,7 +385,7 @@ class Watcher:
                     watch["compacted"][role] = {
                         "ts": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
                         "tokens": tokens}
-                except SystemExit:
+                except (SystemExit, *TERMINAL_ERRORS):
                     pass                      # busy: measured stays, retry next tick
             else:
                 watch["compacted"].pop(role, None)   # back under the line: re-arm

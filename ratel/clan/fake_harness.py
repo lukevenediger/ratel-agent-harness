@@ -20,7 +20,9 @@ from pathlib import Path
 
 from ..bus import Bus, default_home
 from ..ops import AgentOps
+from .config import ClanPaths
 from .loop import NudgeLoop
+from .terminal import publish_lifecycle
 
 
 def newest_thread_for(ops: AgentOps) -> str | None:
@@ -69,7 +71,15 @@ def main(argv: list[str] | None = None) -> None:
     ops = AgentOps(Bus(default_home(), channel), agent)
 
     steps = iter(tomllib.loads(args.playbook.read_text()).get("steps", []))
-    NudgeLoop(lambda _line: play(ops, next(steps, {"action": "noop"})), log=args.log).run()
+    paths = ClanPaths(default_home(), channel)
+    def step(_line):
+        publish_lifecycle(paths, agent, "working")
+        try:
+            play(ops, next(steps, {"action": "noop"}))
+        finally:
+            publish_lifecycle(paths, agent, "idle")
+    publish_lifecycle(paths, agent, "idle")
+    NudgeLoop(step, log=args.log).run()
 
 
 if __name__ == "__main__":

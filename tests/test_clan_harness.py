@@ -100,17 +100,17 @@ def test_settings_json_carries_the_unread_hook_with_env_inline(clan):
 
 def test_settings_hook_command_survives_shell_metacharacters(tmp_path):
     import shlex
-    home = tmp_path / "my home"
-    paths = C.ClanPaths(home, "chan; nel").ensure()
+    home = tmp_path / "my; home"
+    paths = C.ClanPaths(home, "chan-nel").ensure()
     cfg = C.ClanConfig.from_dict(
-        {"channel": "chan; nel", "issue": 42, "repo": "o/r", "checkout": str(tmp_path),
+        {"channel": "chan-nel", "issue": 42, "repo": "o/r", "checkout": str(tmp_path),
          "roles": {"reviewer": {"model": "m"}, "developer": {}}},
         C.load_catalog(tmp_path)).validate()
     H.write_configs(paths, cfg, "reviewer", worktree="/tmp/wt")
     cmd = json.loads((paths.harness_dir("reviewer") / "settings.json").read_text()
                      )["hooks"]["UserPromptSubmit"][0]["hooks"][0]["command"]
     parts = shlex.split(cmd)
-    assert parts[:3] == ["AGENT_NAME=reviewer", "CHANNEL=chan; nel",
+    assert parts[:3] == ["AGENT_NAME=reviewer", "CHANNEL=chan-nel",
                          f"RATEL_HOME={home}"]
     assert parts[-3:] == [sys.executable, "-m", "ratel.unread"]
 
@@ -405,8 +405,8 @@ class FakePopen:
         self.pid = 42424 + len(self.__class__.procs)      # killpg fallback path needs it
         self.returncode: int | None = FakePopen.next_rc
         self.killed = False
-        self.stdout = list(FakePopen.lines_for)
-        self.stderr: list[str] = []
+        self.stdout = io.StringIO("".join(FakePopen.lines_for))
+        self.stderr = io.StringIO()
         if argv[0] != "ps":                  # _ps_lstart's ps calls are not rounds
             type(self).procs.append(self)
 
@@ -427,7 +427,7 @@ class HangingPopen(FakePopen):
     def __init__(self, argv, **kw):
         super().__init__(argv, **kw)
         self.returncode = None
-        self.stdout = []
+        self.stdout = io.StringIO()
 
     def poll(self):
         return None if not self.killed else -9
@@ -797,7 +797,10 @@ def test_round_output_caps_to_the_last_40_lines_unless_clan_round_log_full(clan,
     (paths.harness_dir("developer") / "rounds.jsonl").unlink()
     H.launch(paths, cfg, "developer", worktree="/tmp/wt", unattended=True, stdin=io.StringIO())
     rec = json.loads((paths.harness_dir("developer") / "rounds.jsonl").read_text())
-    assert rec["output"] == "".join(f"line{i}\n" for i in range(50))
+    assert rec["output"] == "".join(f"line{i}\n" for i in range(10, 50))
+    full = paths.harness_dir("developer") / rec["logs"]["stdout"]
+    assert full.read_text() == "".join(f"line{i}\n" for i in range(50))
+    assert rec["truncated"]["stdout"] is True
 
 
 def test_round_argv_logs_the_brief_by_path_not_text(clan, monkeypatch):
@@ -1019,3 +1022,125 @@ def test_missing_env_reports_unset_keys_per_role(clan):
     unset = H.missing_env(cfg, models, environ={})
     assert unset == {"developer": ["DEEPSEEK_API_KEY"]}
     assert H.missing_env(cfg, models, environ={"DEEPSEEK_API_KEY": "sk-x"}) == {}
+
+
+def test_write_configs_refuses_symlink_file(home, tmp_path):
+    paths = C.ClanPaths(home, 'test').ensure()
+    cfg = C.ClanConfig.from_dict(
+        {'channel': 'test', 'issue': 42, 'repo': 'o/r', 'checkout': str(tmp_path),
+         'roles': {'developer': {}}}, C.load_catalog(home)).validate()
+    hd = paths.harness_dir('developer')
+    hd.mkdir()
+    outside = tmp_path / 'keep'
+    outside.write_text('untouched')
+    (hd / 'settings.json').symlink_to(outside)
+    with pytest.raises(ValueError, match='symlink'):
+        H.write_configs(paths, cfg, 'developer')
+    assert outside.read_text() == 'untouched'
+
+
+def test_supervisor_keeps_early_session_id_after_large_output(clan, monkeypatch):
+    cfg, paths = clan
+    cfg.roles['developer'].harness = 'opencode-run'
+    H.write_configs(paths, cfg, 'developer', worktree='/tmp/wt')
+    cls = install_popen(monkeypatch, FakePopen)
+    cls.lines_for = ['{"sessionID":"ses_early"}\n'] + ['x' * 4096] * 30
+    H.launch(paths, cfg, 'developer', worktree='/tmp/wt', unattended=True, stdin=io.StringIO('next\n'))
+    assert 'ses_early' in cls.procs[1].argv
+    records = [json.loads(line) for line in (paths.harness_dir('developer') / 'rounds.jsonl').read_text().splitlines()]
+    assert all(len(r['output']) <= 65536 and r['truncated']['stdout'] for r in records)
+
+
+def test_supervisor_keeps_stderr_failure_excerpt(clan, monkeypatch):
+    cfg, paths = clan
+    cfg.roles['developer'].harness = 'opencode-run'
+    H.write_configs(paths, cfg, 'developer', worktree='/tmp/wt')
+    class Failure(FakePopen):
+        def __init__(self, *args, **kwargs):
+            super().__init__(*args, **kwargs)
+            self.returncode = 1
+            self.stderr = io.StringIO('failure detail\n')
+    install_popen(monkeypatch, Failure)
+    H.launch(paths, cfg, 'developer', worktree='/tmp/wt', unattended=True, stdin=io.StringIO())
+    record = json.loads((paths.harness_dir('developer') / 'rounds.jsonl').read_text())
+    assert record['returncode'] == 1 and record['stderr'] == 'failure detail\n'
+
+
+def test_supervisor_reports_capture_failure(clan, monkeypatch):
+    cfg, paths = clan
+    cfg.roles['developer'].harness = 'opencode-run'
+    H.write_configs(paths, cfg, 'developer', worktree='/tmp/wt')
+    class BrokenStream:
+        def readline(self, size):
+            raise OSError('capture failed')
+    class Failure(FakePopen):
+        def __init__(self, *args, **kwargs):
+            super().__init__(*args, **kwargs)
+            self.stdout = BrokenStream()
+    install_popen(monkeypatch, Failure)
+    H.launch(paths, cfg, 'developer', worktree='/tmp/wt', unattended=True, stdin=io.StringIO())
+    record = json.loads((paths.harness_dir('developer') / 'rounds.jsonl').read_text())
+    assert record['returncode'] == 'error'
+    assert 'output capture failed' in record['output']
+
+
+@pytest.mark.parametrize('limit,rc,reason', [('CLAN_MAX_ROUNDS', 0, 'max_rounds'),
+                                          ('CLAN_MAX_FAILURES', 1, 'max_failures')])
+@pytest.mark.parametrize('backend', ['zellij', 'herdr'])
+def test_supervisor_stops_launching_at_budget(clan, monkeypatch, limit, rc, reason, backend):
+    cfg, paths = clan
+    C.update_state(paths, lambda s: s.update(terminal_backend=backend))
+    cfg.roles['developer'].harness = 'opencode-run'
+    H.write_configs(paths, cfg, 'developer', worktree='/tmp/wt')
+    monkeypatch.setenv(limit, '2')
+    monkeypatch.setattr(FakePopen, 'next_rc', rc)
+    cls = install_popen(monkeypatch, FakePopen)
+    H.launch(paths, cfg, 'developer', worktree='/tmp/wt', unattended=True,
+             stdin=io.StringIO('next\nnext\nnext\n'))
+    assert len(cls.procs) == 2
+    run = C.read_state(paths)['runs']['developer']
+    assert run['reason'] == reason and run['rounds'] == 2
+    if backend == 'herdr':
+        assert C.read_state(paths)['terminal_lifecycle']['developer']['state'] == 'unknown'
+
+
+def test_supervisor_passes_provider_spend_limit(clan, monkeypatch):
+    cfg, paths = clan
+    cfg.roles['developer'].harness = 'claude-p'
+    H.write_configs(paths, cfg, 'developer', worktree='/tmp/wt')
+    monkeypatch.setenv('CLAN_ROUND_BUDGET_USD', '1.25')
+    cls = install_popen(monkeypatch, FakePopen)
+    H.launch(paths, cfg, 'developer', worktree='/tmp/wt', unattended=True, stdin=io.StringIO())
+    argv = cls.procs[0].argv
+    assert argv[argv.index('--max-budget-usd') + 1] == '1.25'
+
+
+def test_launch_deadline_kills_running_round_and_stops(clan, monkeypatch):
+    cfg, paths = clan
+    cfg.roles['developer'].harness = 'opencode-run'
+    H.write_configs(paths, cfg, 'developer', worktree='/tmp/wt')
+    monkeypatch.setenv('CLAN_MAX_SECONDS', '0.1')
+    monkeypatch.setenv('CLAN_ROUND_TIMEOUT', '60')
+    cls = install_popen(monkeypatch, HangingPopen)
+    H.launch(paths, cfg, 'developer', worktree='/tmp/wt', unattended=True,
+             stdin=io.StringIO('retry\nretry\n'))
+    assert len(cls.procs) == 1 and cls.procs[0].killed
+    assert C.read_state(paths)['runs']['developer']['reason'] == 'max_seconds'
+
+
+def test_checkpoint_does_not_reset_launch_budget(clan, monkeypatch):
+    cfg, paths = clan
+    cfg.roles['developer'].harness = 'opencode-run'
+    hd = H.write_configs(paths, cfg, 'developer', worktree='/tmp/wt')
+    monkeypatch.setenv('CLAN_MAX_ROUNDS', '2')
+    class Checkpoint(FakePopen):
+        def __init__(self, *args, **kwargs):
+            super().__init__(*args, **kwargs)
+            (hd / 'reset').touch()
+    cls = install_popen(monkeypatch, Checkpoint)
+    H.launch(paths, cfg, 'developer', worktree='/tmp/wt', unattended=True,
+             stdin=io.StringIO('next\nnext\nnext\n'))
+    assert len(cls.procs) == 2
+    records = [json.loads(line) for line in (hd / 'rounds.jsonl').read_text().splitlines()]
+    assert [r['round'] for r in records] == [1, 1]
+    assert C.read_state(paths)['runs']['developer']['reason'] == 'max_rounds'

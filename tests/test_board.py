@@ -1,4 +1,3 @@
-import fcntl
 import gzip
 import hashlib
 import http.client
@@ -105,6 +104,27 @@ def test_sse_since_replays_missed_messages(home, srv):
             if "".join(chunks).count("\n\n") >= 2: break
     text = "".join(chunks)
     assert "event: hello" in text and missed["id"] in text and a["id"] not in text
+
+
+def test_sse_reconnect_uses_last_event_id_in_append_order(home, srv, monkeypatch):
+    b = Bus(home, "c")
+    first = b.post("o", "original fetch")
+    ids = iter(["01K00000000000000000000009", "01K00000000000000000000001"])
+    monkeypatch.setattr("ratel.bus.ulid", lambda: next(ids))
+    delivered = b.post("o", "already delivered")
+    missed = b.post("o", "missed with a lower ULID")
+    req = urllib.request.Request(srv + f"/api/channels/c/events?since={first['id']}",
+                                 headers={"Last-Event-ID": delivered["id"]})
+    with urllib.request.urlopen(req, timeout=5) as response:
+        chunks = []
+        for raw in response:
+            chunks.append(raw.decode())
+            if "".join(chunks).count("\n\n") == 2:
+                break
+    text = "".join(chunks)
+    assert f"id: {missed['id']}\n" in text
+    assert missed["text"] in text
+    assert delivered["id"] not in text and first["id"] not in text
 
 
 def test_sse_empty_since_replays_from_beginning(home, srv):
@@ -272,7 +292,7 @@ def _seed_clan(home, ch="harbor-42"):
     hd = home / "channels" / ch / "harness" / "developer"
     hd.mkdir(parents=True)
     (hd / "context.txt").write_text("150000\n")
-    return C.ClanPaths(home, ch).state_json
+    return home / "channels" / ch / "channel.sqlite3"
 
 
 def test_clan_endpoint_shapes_the_rows(home, srv):
@@ -335,14 +355,14 @@ def test_channels_are_ordered_by_last_message_not_name(home, srv):
     assert chans[1]["last_id"] is not None and chans[2]["last_id"] is None
 
 
-def test_channel_summary_reads_each_bus_once(home, srv, monkeypatch):
-    """The last id comes from the same pass that counts: no second full read of
-    bus.jsonl just to find the ordering key."""
+def test_channel_summary_avoids_loading_history(home, srv, monkeypatch):
+    """SQLite summaries count and read the tip without loading every message."""
     Bus(home, "a").post("o", "one")
     Bus(home, "b").post("o", "two")
     calls = []
-    real = ratel.board.Bus.read_all
-    monkeypatch.setattr(ratel.board.Bus, "read_all",
+    monkeypatch.setattr(ratel.board.Bus, "read_all", lambda self: pytest.fail("full history read"))
+    real = ratel.board.Bus.summary
+    monkeypatch.setattr(ratel.board.Bus, "summary",
                         lambda self: (calls.append(self.channel), real(self))[1])
     assert json.loads(get(srv, "/api/channels")[2])["channels"]
     assert sorted(calls) == ["a", "b"]
@@ -390,9 +410,14 @@ def _one_poisoned_channel(home, srv, poison):
     return {r["name"]: r for r in json.loads(body)["channels"]}
 
 
+def _poison_legacy(home, ch, raw):
+    (home / "channels" / ch / "channel.sqlite3").unlink()
+    (home / "channels" / ch / "bus.jsonl").write_text(raw)
+
+
 def test_channels_survive_a_non_object_bus_line(home, srv):
     rows = _one_poisoned_channel(
-        home, srv, lambda h, ch: (h / "channels" / ch / "bus.jsonl").write_text("null\n"))
+        home, srv, lambda h, ch: _poison_legacy(h, ch, "null\n"))
     assert set(rows) == {"healthy", "poisoned"}
     # the null line is dropped by read_all, so it is not counted and cannot order the row
     assert rows["poisoned"]["count"] == 0 and rows["poisoned"]["last_id"] is None
@@ -400,8 +425,7 @@ def test_channels_survive_a_non_object_bus_line(home, srv):
 
 def test_channels_survive_a_non_string_last_id(home, srv):
     def poison(home, ch):
-        (home / "channels" / ch / "bus.jsonl").write_text(
-            '{"id": 123, "ts": "t", "from": "o", "text": "x"}\n')
+        _poison_legacy(home, ch, '{"id": 123, "ts": "t", "from": "o", "text": "x"}\n')
     rows = _one_poisoned_channel(home, srv, poison)
     assert set(rows) == {"healthy", "poisoned"}
     assert rows["poisoned"]["last_id"] is None       # dropped, not used as a sort key
@@ -505,22 +529,18 @@ def test_clan_route_survives_a_non_dict_tab(home, srv):
     assert st == 200 and json.loads(body)["roles"][0]["role"] == "developer"
 
 
-def test_clan_route_serves_a_stale_snapshot_when_the_lock_is_held(home, srv):
-    """A writer holding LOCK_EX on clan.state.json must not pin a handler
-    thread: the route returns promptly with the last good snapshot and
-    stale=True."""
-    state_path = _seed_clan(home, "c")
+def test_clan_route_reads_committed_state_while_writer_is_active(home, srv):
+    """WAL readers see the committed snapshot without waiting for the writer."""
+    _seed_clan(home, "c")
     first = json.loads(get(srv, "/api/channels/c/clan")[2])
-    assert first["stale"] is False and first["roles"]
-    with open(state_path, "r") as f:
-        fcntl.flock(f, fcntl.LOCK_EX)
+    with Bus(home, "c").store.connection(write=True) as con:
+        con.execute("UPDATE clan_state SET doc=json_set(doc,'$.session','uncommitted')")
         started = time.monotonic()
         st, _, body = get(srv, "/api/channels/c/clan")
         elapsed = time.monotonic() - started
-        fcntl.flock(f, fcntl.LOCK_UN)
     data = json.loads(body)
-    assert st == 200 and data["stale"] is True
-    assert data["roles"] == first["roles"]           # the last good snapshot
+    assert st == 200 and data["stale"] is False
+    assert data["roles"] == first["roles"]
     assert elapsed < 2.0
 
 
@@ -529,7 +549,7 @@ def test_clan_routes_never_write_state(home, srv):
     are unchanged across a clan, list and messages request. The bus mtime is a
     GET's business only if the handler did not touch the file — `Bus(read_only=)`."""
     state_path = _seed_clan(home, "c")
-    bus_path = home / "channels" / "c" / "bus.jsonl"
+    bus_path = home / "channels" / "c" / "channel.sqlite3"
     state_before = (state_path.read_bytes(), state_path.stat().st_mtime_ns)
     bus_before = (bus_path.read_bytes(), bus_path.stat().st_mtime_ns)
     get(srv, "/api/channels/c/clan")
@@ -545,11 +565,15 @@ def test_sse_replay_skips_a_poisoned_bus_line(home, srv):
     must not be streamed live as an empty card that vanishes on reload."""
     b = Bus(home, "c")
     seen = b.post("o", "seen")
+    after = b.post("o", "after the poison")
+    b.db_path.unlink()
+    b.bus_path.write_text(json.dumps(seen) + "\n")
     poison_id = "01ZZZZZZZZZZZZZZZZZZZZZZZZ"
     with open(b.bus_path, "a") as f:
         f.write("null\n")
         f.write(json.dumps({"id": poison_id, "ts": "t"}) + "\n")   # id only: not a message
-    after = b.post("o", "after the poison")
+    with b.bus_path.open("a") as f:
+        f.write(json.dumps(after) + "\n")
     with urllib.request.urlopen(
             srv + f"/api/channels/c/events?since={seen['id']}", timeout=5) as r:
         chunks = []
@@ -581,7 +605,7 @@ def test_sse_survives_the_bus_being_unlinked_mid_stream(home, srv):
 
     t = threading.Thread(target=run, daemon=True); t.start()
     time.sleep(0.7)
-    b.bus_path.unlink()
+    b.db_path.unlink()
     time.sleep(2.5)
     assert state["events"] >= 1
     assert not state["ended"], f"the stream dropped: {state}"
@@ -593,11 +617,14 @@ def test_sse_delivers_a_bus_recreated_shorter_than_its_offset(home, srv):
     content from byte 0: it must be delivered, not skipped up to the old size."""
     b = Bus(home, "c"); b.post("o", "a long first message " * 20)
     got = {"texts": [], "err": None}
+    ready = threading.Event()
 
     def run():
         try:
             with urllib.request.urlopen(srv + "/api/channels/c/events", timeout=8) as r:
                 for raw in r:
+                    if raw == b"event: hello\n":
+                        ready.set()  # the server has adopted the original tip
                     if raw.startswith(b"data: "):
                         d = json.loads(raw[6:])
                         if isinstance(d, dict) and "text" in d:
@@ -608,8 +635,8 @@ def test_sse_delivers_a_bus_recreated_shorter_than_its_offset(home, srv):
             got["err"] = repr(e)
 
     t = threading.Thread(target=run, daemon=True); t.start()
-    time.sleep(0.7)                               # the stream has adopted the tip
-    b.bus_path.unlink()
+    assert ready.wait(5), "SSE did not adopt the original tip"
+    b.db_path.unlink()
     Bus(home, "c").post("o", "short")             # a fresh, shorter bus
     t.join(6)
     assert got["texts"] == ["short"], got
@@ -710,9 +737,9 @@ def test_board_html_paints_the_active_row_before_the_fetch(srv):
     channel's body has already swapped in."""
     body = get(srv, "/")[2].decode()
     sel = body[body.index("async function selectChannel("):]
-    head = sel[:sel.index("const d = await fetch")]     # before the first await
-    assert "location.hash = ch;" in head and "renderChannels();" in head
-    assert "renderChannels();" in sel[sel.index("const d = await fetch"):]  # resync kept
+    head = sel[:sel.index("const d = await fetchJSON")]     # before the first await
+    assert "saveRoute(route.thread);" in head and "renderChannels();" in head
+    assert "renderChannels();" in sel[sel.index("const d = await fetchJSON"):]  # resync kept
 
 
 def test_board_html_renders_idle_interactive_as_quiet(srv):
@@ -1473,3 +1500,18 @@ def test_a_real_exception_is_still_reported(home, capsys):
     out = _handle_error_output(server, ValueError("a real bug"), capsys)
     assert "a real bug" in (out.err + out.out)
     server.server_close()
+
+
+def test_history_route_bounds_filters_and_separate_pins(home, srv):
+    bus = Bus(home, 'history')
+    old = bus.post('agent', 'find me @stakeholder', pin=True)
+    for i in range(105):
+        bus.post('agent', str(i))
+    page = json.loads(get(srv, '/api/channels/history/history')[2])
+    assert len(page['messages']) == 100 and page['next_before']
+    assert json.loads(get(srv, '/api/channels/history/history?q=find&operator=1')[2])['messages'] == [old]
+    assert json.loads(get(srv, '/api/channels/history/pins')[2])['pins'] == [old]
+    for query in ('limit=201', 'limit=bad', 'before=bad', 'operator=yes'):
+        with pytest.raises(HTTPError) as err:
+            get(srv, '/api/channels/history/history?' + query)
+        assert err.value.code == 400
