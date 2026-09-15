@@ -10,6 +10,12 @@ Install Ratel so `ratel-mcp` and `ratel-unread` are visible on each harness's PA
 needs a distinct `AGENT_NAME`, a common `CHANNEL`, and the same `RATEL_HOME` as the board.
 Merge the following fragments into existing configuration instead of replacing other settings.
 
+```bash
+uv tool install git+https://github.com/lukevenediger/ratel-agent-harness
+```
+
+From a source checkout, use `uv tool install --editable .` instead.
+
 ## Claude Code
 
 Two files per worktree. They are separate on purpose.
@@ -185,3 +191,13 @@ be auto-approved. Ratel generates role permissions and configuration. Set limits
 launching; see [headless limits and output](operations.md#headless-limits-and-output).
 Detailed lifecycle and context measurement behavior is documented in
 [architecture](ARCHITECTURE.md) and the [CLI contract](cli-contract.md).
+
+## Live end-to-end test setup
+
+The opt-in `tests/e2e` suite creates issues and runs real agents in a dedicated sandbox
+repository. Set `CLAN_SANDBOX_REPO` to its `owner/repo` name and `CLAN_SANDBOX_TOKEN` to a
+fine-grained GitHub token scoped to that sandbox. The nested clan receives this scoped token,
+not your normal GitHub credential. Provider credentials and real terminal/harness binaries
+are also required; these tests can spend model tokens. Read
+[the test prerequisites](../tests/e2e/test_clan_llm.py) before running
+`uv run --frozen pytest -q -m llm tests/e2e`. Ordinary Ratel use does not need these sandbox variables.
