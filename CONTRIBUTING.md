@@ -30,7 +30,7 @@ and macOS Python 3.14, plus lint and an installed-wheel smoke test. `CI required
 
 ### Terminal integration tests
 
-Install Zellij for `uv run --frozen pytest -q -m zellij`. Install HerdR 0.9.0+ on PATH, or set
+Install Zellij 0.44.1 (the CI-pinned release) for `uv run --frozen pytest -q -m zellij`. Install HerdR 0.9.0+ on PATH, or set
 `HERDR_TEST_BINARY=/absolute/path/to/herdr`, to include real isolated HerdR tests in the normal
 suite. Use `uv run` so child panes can find the scripted harness executable. These tests create
 temporary homes and servers; they do not use the operator's live sessions or model turns.

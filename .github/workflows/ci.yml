@@ -55,11 +55,18 @@ jobs:
       - run: uv sync --frozen
       - run: npm ci --ignore-scripts --prefix tests/browser
       - run: npx --prefix tests/browser --no-install playwright install --with-deps chromium
-      - name: Install and require Zellij on macOS
+      - name: Install and require Zellij 0.44.1 on macOS
         if: runner.os == 'macOS'
         run: |
-          brew install zellij
-          zellij --version
+          case "$RUNNER_ARCH" in
+            ARM64) target=aarch64-apple-darwin ;;
+            X64) target=x86_64-apple-darwin ;;
+            *) exit 1 ;;
+          esac
+          curl -fsSL "https://github.com/zellij-org/zellij/releases/download/v0.44.1/zellij-$target.tar.gz" -o "$RUNNER_TEMP/zellij.tar.gz"
+          tar -xzf "$RUNNER_TEMP/zellij.tar.gz" -C "$RUNNER_TEMP" zellij
+          "$RUNNER_TEMP/zellij" --version
+          echo "$RUNNER_TEMP" >> "$GITHUB_PATH"
       - name: Install and require HerdR 0.9.0
         shell: bash
         run: |

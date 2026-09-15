@@ -90,7 +90,7 @@ Only the orchestrator owns the shared plan.
 ## Terminal backend preference
 
 Install [HerdR](https://herdr.dev/docs/install/) 0.9.0+ for the default backend, or
-[Zellij](https://zellij.dev/documentation/installation) 0.44+ for the original tabbed workflow.
+[Zellij](https://zellij.dev/documentation/installation) 0.44.1 for the original tabbed workflow.
 Save a preference in `$RATEL_HOME/config.toml`:
 
 ```toml
@@ -107,6 +107,10 @@ use the `attach` command from `clan new` or `clan status`. Ratel uses its own ma
 configuration and disables automatic agent resurrection: restoring a terminal layout does
 not restore a supervised agent. Detaching keeps processes alive; a cold restart requires
 [explicit recovery](operations.md#recover-a-terminal-session).
+
+Use the tested [Zellij 0.44.1 release](https://github.com/zellij-org/zellij/releases/tag/v0.44.1).
+Zellij 0.45.1 is not currently supported for detached clan startup: CI observed empty pane
+listings after tabs were created. CI pins 0.44.1; a package manager may install a newer release.
 
 Zellij creates a stamped session per clan. Use the returned attach command rather than
 constructing its name: long names may be shortened to fit platform socket limits.

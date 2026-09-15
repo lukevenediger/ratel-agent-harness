@@ -104,7 +104,7 @@ proof of provider entitlement.
 | Backend | What you get | Select it |
 |---|---|---|
 | HerdR 0.9.0+ | Shared Ratel session, one workspace per clan, agent activity and readiness-aware nudges | Default for new clans; `--terminal herdr` |
-| Zellij 0.44+ | Separate tabbed session per clan, existing pane-based workflow | `--terminal zellij` |
+| Zellij 0.44.1 | Separate tabbed session per clan, existing pane-based workflow | `--terminal zellij` |
 
 Install [HerdR](https://herdr.dev/docs/install/) or
 [Zellij](https://zellij.dev/documentation/installation). To save a preference, add this to

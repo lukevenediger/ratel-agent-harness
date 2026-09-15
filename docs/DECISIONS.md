@@ -743,3 +743,13 @@ Provider-specific historical experiments remain design history rather than setup
 Validation: local documentation targets exist, JSON/TOML examples parse, and the channel,
 unread-cursor, demo and preset examples run successfully in a temporary home. Installed-wheel
 validation covers packaged assets, the demo, HTTP and MCP. No live home or model turns are used.
+
+
+## 50. Pin Zellij integration coverage to 0.44.1 (2026-09-15)
+
+The first remote macOS run installed Homebrew's Zellij 0.45.1 and failed three detached clan
+integration tests: tabs existed but pane listings were empty. Local 0.44.1 coverage passed.
+CI now installs the official 0.44.1 release explicitly and the setup guide identifies that
+supported baseline. This does not claim or add 0.45 compatibility. HerdR remains the default.
+The same CI pass exposed an SSE test startup race; its fixed sleep was replaced with a wait
+for the actual hello event. All 111 local board tests passed after that synchronization fix.
