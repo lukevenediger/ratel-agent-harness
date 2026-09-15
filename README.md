@@ -18,7 +18,23 @@ role provisioning and orchestration around that channel.
 Each channel has a local SQLite database; there is no server in the write path.
 Attachments and human-edited configuration remain ordinary files.
 
+## Choose your workflow
+
+| You want to… | Use | Additional requirements |
+|---|---|---|
+| Explore the interface | Synthetic board demo | None beyond Ratel |
+| Coordinate agents you already run | Channel + CLI or MCP | Your own agent sessions |
+| Execute a GitHub issue with role agents | Clan runner | Git, authenticated `gh`, agent harnesses and HerdR or Zellij |
+
+A **channel** stores the conversation. A **clan** launches an orchestrator and role agents around
+an issue. The **board** shows their shared work. The **harness** (Claude Code or OpenCode) runs
+the model; the **terminal backend** (HerdR or Zellij) hosts the processes.
+
 ## Quick start
+
+Requires Python 3.12+ and [uv](https://docs.astral.sh/uv/getting-started/installation/).
+From a source checkout:
+
 
 ```bash
 uv sync --frozen
@@ -33,7 +49,7 @@ ratel-board                        # http://127.0.0.1:8787
 To install outside a clone (no PyPI; the tool installs from git):
 
 ```bash
-uv tool install git+https://github.com/lukevenediger/ratel
+uv tool install git+https://github.com/lukevenediger/ratel-agent-harness
 ```
 
 Wire an agent's harness to the MCP server with `examples/mcp.json` (Claude Code) or `examples/opencode.json` (OpenCode). Start with [docs/USER-GUIDE.md](docs/USER-GUIDE.md); details in [docs/harness-setup.md](docs/harness-setup.md).
@@ -51,13 +67,15 @@ Open <http://127.0.0.1:8787/#harbor-demo>. The synthetic channel includes a pinn
 threaded review, code and Markdown attachments. It needs no credentials, Zellij or running
 agents. Use another directory when repeating the demo; there is no destructive reset option.
 
-## Docs
+## Documentation
 
-- [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) — components, on-disk format, message schema, tools, request flows, security boundary.
-- [docs/DECISIONS.md](docs/DECISIONS.md) — design decisions and why.
-- [docs/USER-GUIDE.md](docs/USER-GUIDE.md) — quick and dirty: from issue to clan to PR.
-- [docs/harness-setup.md](docs/harness-setup.md) — Claude Code, OpenCode, Zellij, Tailscale, headless field notes.
-- [docs/design/DESIGN.md](docs/design/DESIGN.md) — the board's visual design contract.
+- **[User guide](docs/USER-GUIDE.md)** — install, try a channel, run your first clan, approve roles, monitor work and finish a run.
+- **[Harness and configuration setup](docs/harness-setup.md)** — connect existing Claude Code/OpenCode sessions, choose a terminal, customize presets and run the board.
+- **[Operations and troubleshooting](docs/operations.md)** — stalled agents, recovery, run limits, upgrades, backups and cleanup.
+- [CLI contract](docs/cli-contract.md) — command inputs, JSON outputs and compatibility guarantees.
+- [Architecture](docs/ARCHITECTURE.md) and [decisions](docs/DECISIONS.md) — implementation and design history.
+- [Contributing](CONTRIBUTING.md) — development, tests and packaging.
+- [Board design](docs/design/DESIGN.md) — visual design contract.
 
 ## Security in one line
 
@@ -65,8 +83,34 @@ The board's reads are unauthenticated and it renders agent-authored content: kee
 
 ## Clans
 
+New clans use **HerdR 0.9.0+** by default: a shared Ratel terminal session,
+one workspace per clan, and one tab per role. Install HerdR using its
+[installation guide](https://herdr.dev/docs/install/), or select Zellij:
+
+```bash
+ratel clan new /path/to/repo 42 --terminal zellij
+```
+
+To save a preference, set this in `$RATEL_HOME/config.toml` (default `~/.ratel/config.toml`):
+
+```toml
+[terminal]
+backend = "herdr" # or "zellij"
+```
+
+The CLI option overrides the preference for a new clan. Existing clans retain their
+recorded backend; older clans are treated as Zellij. Use the `attach` command printed
+by `clan new` or `clan status` to reach Ratel's managed session. Interactive versus
+`--unattended` execution is independent of the terminal choice.
+
+With HerdR, the watcher queues nudges until an agent is ready, reports permission
+prompts to the operator, and exposes terminal activity in the board's role details.
+An agent's terminal `done` state never approves a review or completes an issue.
+`clan down` stops only the selected clan. See [terminal backends](docs/cli-contract.md#terminal-backends)
+for recovery and compatibility details.
+
 One step beyond a channel: `ratel clan new <repo> <issue>` turns a channel
-into a clan of role agents on a zellij session — an orchestrator that runs the
+into a clan of role agents in terminal tabs — an orchestrator that runs the
 `dispatch-issue` skill, a writer on `issue-<n>`, and detached reviewers, each in
 its own tab with its own harness config. Each role's setup is one **preset** —
 harness, model and the provider's own effort word in a single curated choice.

@@ -728,3 +728,18 @@ and **6 provider tests deselected**. Both native startup checks passed separatel
 `uv run --frozen python scripts/verify-wheel.py` passed wheel/assets/demo/HTTP/MCP
 smoke checks; Ruff and `git diff --check` passed. Test homes and managed servers were
 temporary; no production clan or operator terminal session was migrated or stopped.
+
+
+## 49. Task-oriented user documentation (2026-09-15)
+
+The README is the entry point for choosing a plain channel, a board demo or a clan.
+The user guide covers installation through approval, monitoring and cleanup; harness setup
+covers manual MCP connections and configuration; operations owns recovery, limits, migration
+and backups. Terminal backend preference is documented separately from agent presets and
+unattended execution. Examples use the actual ratel-agent-harness repository URL, temporary
+homes for walkthroughs, and the returned attach command instead of invented session names.
+Provider-specific historical experiments remain design history rather than setup requirements.
+
+Validation: local documentation targets exist, JSON/TOML examples parse, and the channel,
+unread-cursor, demo and preset examples run successfully in a temporary home. Installed-wheel
+validation covers packaged assets, the demo, HTTP and MCP. No live home or model turns are used.
