@@ -59,7 +59,7 @@ def test_activity_row_shape_is_exact(home):
     paths, _ = _seed(home, tabs={"developer": {"tab_id": 2, "pane_id": 7}})
     row = _row(S.activity(paths))
     assert set(row) == {
-        "role", "state", "confidence", "since", "reasons", "up", "headless",
+        "terminal", "role", "state", "confidence", "since", "reasons", "up", "headless",
         "harness", "model", "writer", "effort", "model_expired", "branch",
         "worktree", "tab_id", "pane_id", "nudged_at", "nudged_thread", "nudged_by",
         "escalated", "pending", "context_tokens", "checkpoint_at",

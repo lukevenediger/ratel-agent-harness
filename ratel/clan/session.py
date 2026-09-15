@@ -46,8 +46,9 @@ from .gitwt import (
 )
 from .prompts import _CTRL, TEXT_CAP
 from .proposal import clan_config_from, validate_clan_attachment
+from .terminal import OBSERVATION_TTL_S, Terminal, backend_name, preference, terminal_id
 from .watch import MENTION, Watcher, safe_thread
-from .zellij import ZELLIJ_ERRORS, Zellij, scrubbed_env
+from .zellij import ZELLIJ_ERRORS, Zellij, create_session, scrubbed_env
 
 
 class ClanError(Exception):
@@ -153,6 +154,13 @@ def _zellij(state: dict, cfg: ClanConfig) -> Zellij:
     return Zellij(state.get("session", cfg.channel), env={**scrubbed_env(), **env})
 
 
+def _terminal(paths: ClanPaths, state: dict, cfg: ClanConfig) -> Terminal:
+    if backend_name(state) == "herdr":
+        from .herdr import Herdr
+        return Herdr(paths, state)
+    return _zellij(state, cfg)
+
+
 def _launch_argv(paths: ClanPaths, channel: str, role: str) -> list[str]:
     """The tab command: this interpreter, absolute, so the zellij server's PATH is irrelevant."""
     return [sys.executable, "-m", "ratel.cli", "clan", "launch",
@@ -244,127 +252,25 @@ def _refuse_if_no_nested(what: str) -> None:
                  "environment must not create a clan on this zellij server)")
 
 
-SOCKET_PATH_MAX = 103          # a unix socket path caps here; measured on zellij 0.44.1
-SESSION_STAMPS = ("%m%d-%H%M", "%H%M")   # tried in order: our stamp is the cheapest thing to lose
-MIN_CHANNEL_CHARS = 4          # below this a truncated name says nothing
-SESSION_TRIES = 100
-
-
-_CS_DARWIN_USER_TEMP_DIR = 65537   # confstr(3): the per-user /var/folders/.../T dir
-
-
-def _darwin_temp_dir() -> str:
-    """macOS's per-user temp dir, which is what `$TMPDIR` normally holds."""
-    if sys.platform != "darwin":
-        return ""
-    try:
-        return os.confstr(_CS_DARWIN_USER_TEMP_DIR) or ""
-    except (ValueError, OSError):
-        return ""
-
-
-def _socket_prefix(tmp: str) -> int:
-    return len(f"{tmp.rstrip('/')}/zellij-{os.getuid()}/contract_version_1/".encode())
-
-
-def session_name_budget(env: dict[str, str] | None = None) -> int:
-    """How many characters a zellij session name may have on this machine.
-
-    zellij binds its IPC socket at `$TMPDIR/zellij-<uid>/contract_version_1/<session>`,
-    and a unix socket path caps at 103 bytes. On macOS `$TMPDIR` alone is ~49
-    bytes, which leaves about 24 characters for the whole session name — a
-    stamped `<repo>-<issue>` name overruns it and zellij refuses to start.
-
-    `TMPDIR` set is taken at its word: zellij uses what it is given, and a
-    short one must not be second-guessed into shortening names for nothing.
-    Unset, we cannot see what zellij will resolve — Python would say `/tmp`
-    while zellij's process may well have the 49-byte per-user dir — so budget
-    for the longest it could be. `budget_from_error` corrects either way.
-    """
-    env = os.environ if env is None else env
-    tmp = env.get("TMPDIR")
-    if tmp:
-        return SOCKET_PATH_MAX - _socket_prefix(tmp)
-    return SOCKET_PATH_MAX - max(_socket_prefix(d) for d in ("/tmp", _darwin_temp_dir() or "/tmp"))
-
-
-SOCKET_TOO_LONG = re.compile(r"socket path is too long \((\d+) bytes, max (\d+)\)")
-
-
-def budget_from_error(message: str, name: str) -> int | None:
-    """The exact budget, taken from zellij's own arithmetic in its refusal.
-
-    Predicting the socket path means guessing at zellij's layout and at what
-    `$TMPDIR` its process sees. When it refuses it states both numbers, and
-    subtracting the name we sent gives the prefix it actually used. None when
-    the message is some other failure.
-    """
-    m = SOCKET_TOO_LONG.search(message)
-    if not m:
-        return None
-    used, cap = int(m.group(1)), int(m.group(2))
-    return cap - (used - len(name.encode()))
-
-
-def _fit(channel: str, suffix: str, budget: int) -> str | None:
-    """`channel + suffix`, trimming the channel's HEAD when the pair is over
-    budget. The head is what goes: the tail carries the issue number, which is
-    what tells two clans on one repo apart. None when nothing legible fits."""
-    room = budget - len(suffix)
-    if room < MIN_CHANNEL_CHARS:
-        return None
-    return (channel if len(channel) <= room else channel[-room:]) + suffix
-
-
-def unique_session(channel: str, taken: Callable[[str], bool],
-                   now: datetime | None = None, budget: int | None = None) -> str:
-    """A zellij session name for `channel` that nothing on the server holds.
-
-    The channel keeps its stable `<repo>-<issue>` name — it is the bus, the
-    board's identity and what `--channel` addresses — while the zellij session
-    it runs in is stamped with the local start time. They are no longer the
-    same string: a clan that exited still owns its session name (zellij lists
-    EXITED sessions for `attach` to resurrect), and a restart on the same issue
-    must not be refused because its predecessor is still listed.
-
-    The name must also fit `session_name_budget()`. Order of sacrifice: the
-    stamp's date first (`0910-2041` → `2041`), the channel's head last.
-    """
-    now = now or datetime.now()
-    budget = session_name_budget() if budget is None else budget
-    stamps = [now.strftime(f) for f in SESSION_STAMPS]
-    for i, stamp in enumerate(stamps):
-        whole = len(channel) + 1 + len(stamp) <= budget
-        if not whole and i < len(stamps) - 1:
-            continue               # a shorter stamp beats a truncated channel
-        for n in range(1, SESSION_TRIES + 1):
-            suffix = f"-{stamp}" if n == 1 else f"-{stamp}-{n}"
-            name = _fit(channel, suffix, budget)
-            if name is None:
-                break
-            if not taken(name):
-                if name != f"{channel}{suffix}":
-                    print(f"ratel clan: session name shortened to {name!r} — "
-                          f"a zellij socket path caps at {SOCKET_PATH_MAX} bytes",
-                          file=sys.stderr)
-                return name
-    if _fit(channel, f"-{stamps[-1]}", budget) is None:
-        sys.exit(f"ratel clan new: $TMPDIR is too long to name a session under it "
-                 f"({budget} characters left of the {SOCKET_PATH_MAX}-byte socket path "
-                 f"cap) — set a shorter TMPDIR")
-    sys.exit(f"ratel clan new: no free session name after {SESSION_TRIES} tries "
-             f"for channel {channel!r} — `zellij list-sessions` and clean up")
-
 
 def new(home: Path, checkout: str | Path, issue: int, session: str | None = None,
         oharness: str | None = None, omodel: str | None = None,
-        unattended: bool = False, zellij_env: dict[str, str] | None = None) -> dict:
+        unattended: bool = False, zellij_env: dict[str, str] | None = None,
+        terminal: str | None = None) -> dict:
     """Create the channel, seed clan.toml with the orchestrator, open its session."""
     _refuse_if_no_nested("new")
+    backend = preference(home, terminal)
+    if zellij_env is not None and backend != "zellij":
+        raise ValueError("zellij isolation requires --terminal zellij")
+    from .tools import require_binary
+    if backend == "herdr":
+        require_binary(backend, "new clans; select --terminal herdr or --terminal zellij")
     checkout = Path(checkout).expanduser().resolve()
     slug = repo_slug(checkout)
     channel = session or f"{slug.split('/')[-1]}-{issue}"
     paths = ClanPaths(home, channel).ensure()
+    if backend == "herdr" and read_state(paths).get("tabs"):
+        raise ValueError("clan already has launches; run clan down before clan new")
     Bus(home, channel)                      # creates the channel dirs and SQLite database
 
     over: dict[str, Any] = {}
@@ -379,31 +285,25 @@ def new(home: Path, checkout: str | Path, issue: int, session: str | None = None
 
     env = {k: v for k, v in (zellij_env or {}).items() if k in ISOLATION_KEYS}
     zenv = {**scrubbed_env(), **env}
-    held = Zellij(channel, env=zenv).sessions()
-    zsession = unique_session(channel, held.__contains__,
-                              budget=session_name_budget(zenv))
-    z = Zellij(zsession, env=zenv)
-    try:
-        z.create_background()
-    except ValueError as e:                 # the socket path we predicted was wrong
-        budget = budget_from_error(str(e), zsession)
-        if budget is None:
-            raise
-        print(f"ratel clan: zellij refused {zsession!r} as too long for its socket "
-              f"path; retrying inside the {budget} characters it allows", file=sys.stderr)
-        zsession = unique_session(channel, held.__contains__, budget=budget)
-        z = Zellij(zsession, env=zenv)
-        z.create_background()
-    harness.write_configs(paths, cfg, "orchestrator", worktree=None, unattended=unattended)
-    if unattended:                          # the headless kickoff cannot answer claude's
-        harness.mark_trusted(checkout)      # first-run trust dialog — pre-mark the path
-
+    if backend == "herdr":
+        from .herdr import Herdr
+        z = Herdr(paths, {})
+        z.create_background(checkout)
+        zsession = z.session
+    else:
+        z = create_session(channel, zenv, factory=Zellij)
+        zsession = z.session
     update_state(paths, lambda s: s.update(
+        terminal_backend=backend, workspace_id=getattr(z, "workspace", None),
         session=zsession, python=sys.executable, unattended=bool(unattended), env=env, maintenance_ready=False, runs={},
         checkout=str(checkout), writers={"orchestrator": cfg.roles["orchestrator"].writer},
         briefs={"orchestrator": cfg.roles["orchestrator"].brief},
         created=datetime.now(timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z"),
-        tabs={}))
+        tabs={}, watch={}, terminal_lifecycle={}, terminal_controls={}))
+    harness.write_configs(paths, cfg, "orchestrator", worktree=None, unattended=unattended)
+    if unattended:                          # the headless kickoff cannot answer claude's
+        harness.mark_trusted(checkout)      # first-run trust dialog — pre-mark the path
+
     clan_tabs = (
         ("orchestrator", checkout, _launch_argv(paths, channel, "orchestrator")),
         ("watch", paths.channel_dir, [sys.executable, "-m", "ratel.cli", "clan", "watch",
@@ -421,8 +321,11 @@ def new(home: Path, checkout: str | Path, issue: int, session: str | None = None
             kind = cfg.roles["orchestrator"].harness
             info["harness"] = headless_kind(kind) if unattended else kind
         _record_tab(paths, name, info)
-    _close_stray_tabs(z, keep={name for name, _, _ in clan_tabs})
-    return {"session": zsession, "channel": channel, "attach": f"zellij attach {zsession}"}
+    if backend == "zellij":
+        _close_stray_tabs(z, keep={name for name, _, _ in clan_tabs})
+    return {"session": zsession, "channel": channel, "terminal_backend": backend,
+            "workspace_id": getattr(z, "workspace", None),
+            "attach": z.attach_command() if backend == "herdr" else f"zellij attach {zsession}"}
 
 
 def up(paths: ClanPaths) -> dict:
@@ -435,12 +338,19 @@ def up(paths: ClanPaths) -> dict:
     if missing:
         sys.exit("ratel clan up: missing environment keys — " +
                  "; ".join(f"{role}: {', '.join(vars_)}" for role, vars_ in missing.items()))
-    z = _zellij(state, cfg)
+    z = _terminal(paths, state, cfg)
     if z.session not in z.live_sessions():
-        sys.exit(f"ratel clan up: zellij session {z.session!r} is gone — "
+        sys.exit(f"ratel clan up: {backend_name(state)} session {z.session!r} is gone — "
                  "`clan down` killed it (a reboot also drops an exited one). "
                  "Run `ratel clan new <checkout> <issue>` to start a fresh session, "
                  "then `clan up`.")
+    if backend_name(state) == "herdr":
+        for role, tab in state.get("tabs", {}).items():
+            if role in cfg.roles and tab.get("launch_pid"):
+                try:
+                    z.resolve(tab["pane_id"])
+                except (ValueError, OSError):
+                    sys.exit(f"ratel clan up: {role}'s launch is lost; run clan down, then clan new to recover")
     update_state(paths, lambda s: s.update(maintenance_ready=False))
     branch = f"issue-{cfg.issue}"
     todo = [r for r in cfg.roles if r != "orchestrator" and r not in (state.get("tabs") or {})]
@@ -497,7 +407,7 @@ def watch(paths: ClanPaths) -> None:
     def cp(role: str, mode: str, reason: str) -> None:
         checkpoint(paths, role, mode=mode, force=False, reason=reason)
 
-    Watcher(Bus(paths.home, cfg.channel), paths, _zellij(state, cfg),
+    Watcher(Bus(paths.home, cfg.channel), paths, _terminal(paths, state, cfg),
             thresholds={r: s.checkpoint_at for r, s in cfg.roles.items()},
             checkpoint=cp).run()
 
@@ -640,6 +550,22 @@ def _round_state(paths: ClanPaths, role: str) -> dict:
             break
     return {"n": n, "running": running, "outcome": outcome, "last_ts": last_ts,
             "started_s": started_s}
+
+
+def terminal_observation(state: dict, role: str, now: datetime) -> dict | None:
+    if backend_name(state) != "herdr":
+        return None
+    watch = state.get("watch") or {}
+    observations = watch.get("terminal")
+    observations = observations if isinstance(observations, dict) else {}
+    obs = observations.get(role)
+    obs = obs if isinstance(obs, dict) else {}
+    age = _seconds_since(obs.get("at"), now)
+    fresh = age is not None and 0 <= age <= OBSERVATION_TTL_S
+    status = obs.get("state")
+    if status not in ("idle", "done", "working", "blocked", "unknown", "unavailable"):
+        status = "unknown"
+    return {"state": status, "at": _as_str(obs.get("at")), "stale": not fresh, "source": "herdr"}
 
 
 def _activity_from(paths: ClanPaths, cfg: ClanConfig, state: dict,
@@ -790,7 +716,11 @@ def _activity_from(paths: ClanPaths, cfg: ClanConfig, state: dict,
             "headless": headless, "harness": harness_kind, "model": spec.model,
             "writer": bool(spec.writer), "effort": _as_str(spec.effort),
             "model_expired": expired, "branch": branch, "worktree": worktree,
-            "tab_id": _as_int(tab.get("tab_id")), "pane_id": _as_int(tab.get("pane_id")),
+            "tab_id": (terminal_id(tab.get("tab_id")) if backend_name(state) == "herdr"
+                       else _as_int(tab.get("tab_id"))),
+            "pane_id": (terminal_id(tab.get("pane_id")) if backend_name(state) == "herdr"
+                        else _as_int(tab.get("pane_id"))),
+            "terminal": terminal_observation(state, role, now),
             "nudged_at": _as_str(nd.get("at")) if nd else None,
             "nudged_thread": _as_str(nd.get("id")) if nd else None,
             "nudged_by": _as_str(nd.get("by")) if nd else None,
@@ -806,6 +736,7 @@ def _activity_from(paths: ClanPaths, cfg: ClanConfig, state: dict,
             "awaiting": {"at": _as_str(aw.get("at")), "text": aw_text} if aw else None,
         })
     return {"session": state.get("session", cfg.channel), "channel": cfg.channel,
+            "terminal_backend": backend_name(state), "workspace_id": state.get("workspace_id"),
             "issue": cfg.issue, "repo": cfg.repo, "roles": rows,
             "warnings": warnings, "generated": now_iso(), "stale": False,
             "checkpoints": state.get("checkpoints", []), "presence": presence}
@@ -832,7 +763,8 @@ def status(paths: ClanPaths, screen: bool = False) -> dict:
         out = _activity_from(paths, cfg, state)
     except ClanError as e:
         sys.exit(f"ratel clan: {e}")     # models.toml, like clan.toml, exits cleanly
-    z = _zellij(state, cfg)
+    z = _terminal(paths, state, cfg)
+    out["attach"] = z.attach_command() if backend_name(state) == "herdr" else f"zellij attach {z.session}"
     for row in out["roles"]:
         wt = row.get("worktree")
         row["dirty"] = is_dirty(wt) if wt and Path(wt).exists() else False
@@ -937,14 +869,18 @@ def nudge(paths: ClanPaths, role: str, text: str | None = None) -> dict:
     tab = _tab(state, role)
     pane = tab.get("pane_id")
     if pane is None:                         # a slow start: re-resolve once
-        pane = _zellij(state, cfg).pane_or_none(role) if tab else None
+        pane = _terminal(paths, state, cfg).pane_or_none(role) if tab else None
         if pane is None:                     # one message for both no-record and no-pane
             sys.exit(f"ratel clan nudge: no pane for {role} — is it up?")
         update_state(paths, lambda s, pane=pane: s["tabs"][role].__setitem__("pane_id", pane))
     msgs = Bus(paths.home, cfg.channel).read_all()
     text = text or MENTION.format(role=role, n=0, channel=cfg.channel, senders="human",
                                   thread=msgs[-1]["id"] if msgs else "the newest message")
-    _zellij(state, cfg).nudge(pane, text)
+    if backend_name(state) == "herdr":
+        from .watch import queue_control
+        queue_control(paths, role, text)
+        return {"role": role, "pane": pane, "text": text, "queued": True}
+    _terminal(paths, state, cfg).nudge(pane, text)
     return {"role": role, "pane": pane, "text": text}
 
 
@@ -964,7 +900,9 @@ def _is_busy(state: dict, role: str) -> bool:
     The one definition: `checkpoint`'s refusal and the map's busy dot both read
     it, so they cannot drift."""
     watch = state.get("watch") or {}
-    return role in (watch.get("pending") or {}) or role in (watch.get("nudged") or {})
+    controls = state.get("terminal_controls") or {}
+    return (role in (watch.get("pending") or {}) or role in (watch.get("nudged") or {})
+            or any(c.get("role") == role for c in controls.values() if isinstance(c, dict)))
 
 
 def checkpoint(paths: ClanPaths, role: str, mode: str = "clear", force: bool = False,
@@ -1006,9 +944,12 @@ def checkpoint(paths: ClanPaths, role: str, mode: str = "clear", force: bool = F
         pane = tab.get("pane_id")
         if pane is None:
             sys.exit(json.dumps({"role": role, "reason": "not up"}))
-        z = _zellij(state, cfg)
-        z.write_chars(pane, "/compact" if mode == "compact" else CLEAR_KEYS[kind])
-        z.press_enter(pane)                  # the command runs before the nudge lands
+        z = _terminal(paths, state, cfg)
+        if backend_name(state) == "herdr":
+            z.nudge(pane, "/compact" if mode == "compact" else CLEAR_KEYS[kind])
+        else:
+            z.write_chars(pane, "/compact" if mode == "compact" else CLEAR_KEYS[kind])
+            z.press_enter(pane)                  # the command runs before the nudge lands
         time.sleep(2)
         if mode == "clear":
             # /clear (and /new) rotate the session file: the pinned session_id
@@ -1025,7 +966,11 @@ def checkpoint(paths: ClanPaths, role: str, mode: str = "clear", force: bool = F
         thread = nudged_id if is_ulid(nudged_id) else (safe_thread(own[-1]) if own else "")
         tail = f"continue thread {thread} or wait for the next dispatch." if thread \
             else "wait for the next dispatch."
-        z.nudge(pane, REORIENT.format(tail=tail))
+        if backend_name(state) == "herdr":
+            from .watch import queue_control
+            queue_control(paths, role, REORIENT.format(tail=tail))
+        else:
+            z.nudge(pane, REORIENT.format(tail=tail))
     else:
         sys.exit(json.dumps({"role": role, "reason": f"unknown harness {kind!r}"}))
     record = {"role": role, "mode": mode, "ts": ts,
@@ -1055,7 +1000,7 @@ def down(paths: ClanPaths, prune_worktrees: bool = False, force: bool = False) -
                 raise ValueError("recorded worktree is outside this clan's expected layout; refusing to prune")
             if path.exists() and not force and is_dirty(path):
                 raise ValueError(f"{path} has uncommitted changes — use --force with --prune-worktrees to discard them")
-    _zellij(state, cfg).kill()
+    _terminal(paths, state, cfg).kill()
     killed_rounds = 0
     for role in cfg.roles:                       # a round outlives its pane: kill its group
         if harness.terminate_round(paths.harness_dir(role) / "round.pid"):
@@ -1067,5 +1012,6 @@ def down(paths: ClanPaths, prune_worktrees: bool = False, force: bool = False) -
                 remove_worktree(cfg.checkout, tab["worktree"], force=force)
                 removed.append(tab["worktree"])
     update_state(paths, lambda s: s.update(tabs={}, maintenance_ready=True))
-    return {"session": state.get("session", cfg.channel), "worktrees_removed": removed,
+    return {"session": state.get("session", cfg.channel), "terminal_backend": backend_name(state),
+            "workspace_id": state.get("workspace_id"), "worktrees_removed": removed,
             "rounds_killed": killed_rounds}

@@ -20,6 +20,7 @@ from .budget import STOP_REASONS, Budget, Limits
 from .config import ClanConfig, ClanPaths, update_state
 from .loop import NudgeLoop
 from .output import OutputTail
+from .terminal import publish_lifecycle
 
 
 def run(runtime, cfg: ClanConfig, role: str, hd: Path, channel_dir: Path,
@@ -76,6 +77,7 @@ def run(runtime, cfg: ClanConfig, role: str, hd: Path, channel_dir: Path,
         if reason := budget.reason():
             publish(reason)
             return False
+        publish_lifecycle(paths, role, "working")
         budget.rounds += 1
         reset = False
         if confined(hd, "reset").exists():          # `clan checkpoint` left a rewind marker
@@ -235,6 +237,7 @@ def run(runtime, cfg: ClanConfig, role: str, hd: Path, channel_dir: Path,
         budget.finish(record['returncode'])
         reason = budget.reason()
         publish(reason)
+        publish_lifecycle(paths, role, "blocked" if reason or record["returncode"] in ("prompt", "auth") else "idle")
         return False if reason else None
 
     try:
@@ -244,6 +247,7 @@ def run(runtime, cfg: ClanConfig, role: str, hd: Path, channel_dir: Path,
             if budget.reason() == 'max_seconds':
                 publish('max_seconds')
     finally:
+        publish_lifecycle(paths, role, "unknown")
         _kill_current()
         for number, handler in previous_handlers.items():
             signal.signal(number, handler)

@@ -1,9 +1,8 @@
 """`ratel clan …` — the argparse surface over `clan/session.py`.
 
 Every command prints one JSON value, like the rest of the CLI. The channel and
-the clan share a name, `<repo>-<issue>`; the zellij session is that name plus a
-start-time stamp, so a restart never collides with a predecessor zellij still
-lists. `clan new` prints the attach command; `clan.state.json` records it.
+the clan share a name, `<repo>-<issue>`. Runtime state records the terminal
+backend and its session/workspace. `clan new` prints the attach command.
 """
 from __future__ import annotations
 
@@ -22,8 +21,8 @@ def add_parser(sub: argparse._SubParsersAction) -> None:
     common = argparse.ArgumentParser(add_help=False)
     common.add_argument("--home", help="overrides RATEL_HOME")
     common.add_argument("--channel",
-                        help="the clan's channel; its zellij session is recorded in "
-                             "clan.state.json")
+                        help="the clan's channel; its terminal session is recorded in "
+                             "SQLite runtime state")
     common.add_argument("--pretty", action="store_true", help="indent the JSON output")
     cs = clan.add_subparsers(dest="clan_cmd", required=True)
 
@@ -47,8 +46,8 @@ def add_parser(sub: argparse._SubParsersAction) -> None:
     p.add_argument("--orchestrator-harness", dest="oharness")
     p.add_argument("--orchestrator-model", dest="omodel")
     p.add_argument("--session", metavar="CHANNEL",
-                   help="channel name (default: <repo>-<issue>); the zellij session is "
-                        "this plus a timestamp")
+                   help="channel name (default: <repo>-<issue>); runtime state records its terminal session")
+    p.add_argument("--terminal", choices=["herdr", "zellij"], help="terminal backend (saved preference or herdr)")
     p.add_argument("--unattended", action="store_true", help="no human in the tab: take defaults")
     p.add_argument("--zellij-tmp", dest="zellij_tmp", metavar="DIR",
                    help="run this clan's zellij server under DIR instead of the user's (tests)")
@@ -77,7 +76,7 @@ def add_parser(sub: argparse._SubParsersAction) -> None:
     p = cs.add_parser("sync", parents=[common], help="fast-forward a detached worktree to the branch tip")
     p.add_argument("role")
 
-    p = cs.add_parser("down", parents=[common], help="kill the session")
+    p = cs.add_parser("down", parents=[common], help="stop this clan’s terminals")
     p.add_argument("--prune-worktrees", action="store_true", help="also remove clean worktrees it made")
     p.add_argument("--force", action="store_true", help="with --prune-worktrees, discard uncommitted changes")
 
@@ -88,7 +87,7 @@ def _home(args) -> Path:
 
 def _paths(args) -> ClanPaths:
     if not args.channel:
-        sys.exit("ratel clan: pass --channel (the clan's channel and zellij session)")
+        sys.exit("ratel clan: pass --channel (the clan's coordination channel)")
     return ClanPaths(_home(args), args.channel)
 
 
@@ -99,7 +98,8 @@ def run(args: argparse.Namespace) -> Any:
     if cmd == "new":
         from .zellij import isolated_env
         return session.new(_home(args), args.checkout, args.issue, session=args.session or args.channel,
-                           oharness=args.oharness, omodel=args.omodel, unattended=args.unattended,
+                           oharness=args.oharness, omodel=args.omodel,
+                           unattended=args.unattended, terminal=args.terminal,
                            zellij_env=isolated_env(args.zellij_tmp) if args.zellij_tmp else None)
     paths = _paths(args)
     if cmd == "propose":

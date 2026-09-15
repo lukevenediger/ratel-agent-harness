@@ -683,3 +683,48 @@ assets, demo, HTTP and MCP). `npm ci --ignore-scripts`, `uv lock --check`, Ruff,
 `git diff --check` and actionlint v1.7.7 passed. All six implementation phases are complete
 locally. The new Linux/macOS GitHub matrix still awaits a push, and branch-protection settings
 were not modified. No live home was read, no model tokens were spent, and no branch was pushed.
+
+
+**48. HerdR is the default terminal backend for new clans (2026-09-15).**
+The operator chose an agent-aware backend, a shared Ratel session with one workspace
+per clan, and HerdR as the new-clan default. `clan new --terminal herdr|zellij`
+overrides `[terminal] backend` in `$RATEL_HOME/config.toml`; existing runtime records
+retain their backend, and records without one mean Zellij. Interactive/unattended
+execution and harness/model presets remain separate choices.
+
+Ratel owns roles, worktrees, coordination, approvals, checkpoints and headless budgets.
+HerdR 0.9.0+ owns terminal layout and supplies interactive agent observations. The
+watcher persists observations for the read-only board and retains nudges until ready;
+manual input, verdicts, escalations and checkpoint reorientation use a separate durable
+control queue. Lifecycle observations never stand in for task completion or review gates.
+The CLI's `interactive_ready` field belongs to HerdR-managed launches; Ratel-launched
+agents use observed lifecycle and foreground-process identity instead.
+
+Each Ratel home has a deterministic named HerdR server with isolated configuration;
+agent XDG paths are restored so server isolation does not hide provider configuration.
+Ratel disables native agent restore. Immutable terminal IDs plus launch PID/start time
+prevent input reaching a restored shell or replacement process and follow moved panes.
+Shutdown closes owned terminals/workspaces only, preserving other clans and foreign
+panes moved into the workspace. Shared server failure affects all its clans. Explicit
+`clan down` then `clan new` is the recovery path; an alive but unreachable server is
+not replaced implicitly. This is lifecycle ownership, not a security boundary.
+
+HerdR observations and doctor are read-only; only the watcher publishes supervised
+headless status to HerdR. Errors in display reporting do not change budget decisions.
+Delivery remains at least once across ambiguous CLI timeouts/crashes. Native global
+integration installation, cold conversation resume, live backend migration, remote
+orchestration and persistent socket subscriptions are outside this change.
+
+Validation includes a temporary HerdR v0.9.0 binary, two simultaneous clans, writer and
+reviewer worktrees, verdict delivery, terminal moves, scoped shutdown and cold-restart
+input refusal. Startup-only checks of Claude Code 2.1.271 and OpenCode 1.18.31 passed
+without submitting prompts/model turns. Existing Zellij integration checks run through
+`uv run` so child terminals find the local harness executables. CI installs HerdR 0.9.0
+for Linux/macOS scripted integration coverage; provider startup checks remain opt-in.
+
+Final verification: `HERDR_TEST_BINARY=/tmp/ratel-herdr uv run --frozen pytest -q
+--tb=short` passed **813 tests**, with **2 optional native startup checks skipped**
+and **6 provider tests deselected**. Both native startup checks passed separately.
+`uv run --frozen python scripts/verify-wheel.py` passed wheel/assets/demo/HTTP/MCP
+smoke checks; Ruff and `git diff --check` passed. Test homes and managed servers were
+temporary; no production clan or operator terminal session was migrated or stopped.

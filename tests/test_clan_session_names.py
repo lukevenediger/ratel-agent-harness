@@ -8,7 +8,7 @@ import datetime
 
 import pytest
 
-from ratel.clan import session as S
+from ratel.clan import zellij as S
 
 
 def taken(*names):

@@ -1086,8 +1086,10 @@ def test_supervisor_reports_capture_failure(clan, monkeypatch):
 
 @pytest.mark.parametrize('limit,rc,reason', [('CLAN_MAX_ROUNDS', 0, 'max_rounds'),
                                           ('CLAN_MAX_FAILURES', 1, 'max_failures')])
-def test_supervisor_stops_launching_at_budget(clan, monkeypatch, limit, rc, reason):
+@pytest.mark.parametrize('backend', ['zellij', 'herdr'])
+def test_supervisor_stops_launching_at_budget(clan, monkeypatch, limit, rc, reason, backend):
     cfg, paths = clan
+    C.update_state(paths, lambda s: s.update(terminal_backend=backend))
     cfg.roles['developer'].harness = 'opencode-run'
     H.write_configs(paths, cfg, 'developer', worktree='/tmp/wt')
     monkeypatch.setenv(limit, '2')
@@ -1098,6 +1100,8 @@ def test_supervisor_stops_launching_at_budget(clan, monkeypatch, limit, rc, reas
     assert len(cls.procs) == 2
     run = C.read_state(paths)['runs']['developer']
     assert run['reason'] == reason and run['rounds'] == 2
+    if backend == 'herdr':
+        assert C.read_state(paths)['terminal_lifecycle']['developer']['state'] == 'unknown'
 
 
 def test_supervisor_passes_provider_spend_limit(clan, monkeypatch):

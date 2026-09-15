@@ -17,6 +17,10 @@ STATE_VERSION = 1
 class ClanState(TypedDict, total=False):
     maintenance_ready: bool
     runs: dict[str, dict]
+    terminal_backend: str
+    workspace_id: str | None
+    terminal_controls: dict[str, dict]
+    terminal_lifecycle: dict[str, dict]
     session: str
     checkout: str
     tabs: dict[str, dict]
@@ -34,12 +38,16 @@ def store_for(paths):
 def validate(doc):
     if not isinstance(doc, dict):
         raise ValueError('clan state must be an object')
-    for key in ('tabs', 'watch', 'writers', 'briefs', 'env', 'runs'):
+    for key in ('tabs', 'watch', 'writers', 'briefs', 'env', 'runs', 'terminal_controls', 'terminal_lifecycle'):
         if key in doc and not isinstance(doc[key], dict):
             raise ValueError(f'clan state {key} must be an object')
     for key in ('session', 'checkout'):
         if key in doc and not isinstance(doc[key], str):
             raise ValueError(f'clan state {key} must be a string')
+    if 'terminal_backend' in doc and doc['terminal_backend'] not in ('herdr', 'zellij'):
+        raise ValueError('unknown terminal backend')
+    if doc.get('workspace_id') is not None and not isinstance(doc['workspace_id'], str):
+        raise ValueError('workspace_id must be a string')
     # Also reject non-finite numbers and unserializable objects before a commit.
     json.dumps(doc, allow_nan=False)
     return doc

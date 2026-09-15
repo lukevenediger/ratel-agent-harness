@@ -8,6 +8,7 @@ from pathlib import Path
 from .bus import Bus
 from .clan.config import ClanConfig, ClanPaths, load_catalog, load_models, read_state
 from .clan.state import revision
+from .clan.terminal import backend_name
 from .storage import Store
 
 
@@ -44,7 +45,23 @@ def diagnose(home, channel=None):
                 migrated = revision(paths) is not None
                 check('state', 'ok' if migrated else 'warning',
                       'SQLite state' if migrated else 'legacy or absent state; use migrate-state for existing JSON')
-                binaries = {'zellij', 'git'}
+                binaries = {backend_name(state), 'git'}
+                if backend_name(state) == 'herdr' and shutil.which('herdr'):
+                    from .clan.herdr import Herdr
+                    from .clan.terminal import TERMINAL_ERRORS
+                    try:
+                        terminal = Herdr(paths, state)
+                        live = terminal.session in terminal.live_sessions()
+                        check('terminal:workspace', 'ok' if live else 'warning',
+                              'available' if live else 'missing; use clan down then clan new')
+                        for role, tab in state.get('tabs', {}).items():
+                            if role in cfg.roles and tab.get('pane_id'):
+                                observation = terminal.observe(tab['pane_id'])
+                                check('terminal:' + role,
+                                      'warning' if observation['state'] == 'unavailable' else 'ok',
+                                      observation['state'])
+                    except TERMINAL_ERRORS:
+                        check('terminal:runtime', 'warning', 'unavailable; inspect the HerdR server')
                 names = set()
                 models = load_models(home)
                 for role in cfg.roles.values():

@@ -42,7 +42,7 @@ and read semantics cannot drift between them.
 ## Clan commands
 
 `ratel clan …` drives a clan of role agents on one issue. The clan's
-channel, zellij session and config all share one name.
+channel identifies its coordination history. Runtime state records the selected terminal backend and its session.
 
 | Command | Purpose | JSON value |
 |---|---|---|
@@ -50,15 +50,15 @@ channel, zellij session and config all share one name.
 | `clan catalog` | harnesses, presets, roles and models — the same object `GET /api/clan/catalog` serves the board | `{"harnesses": […], "presets": [{id, order, label, harness, model, effort}], "roles": {role: {preset, harness, model, effort, writer, brief, checkpoint_at}}, "models": [{id, name, harness, provider, env, expires, effort_levels}]}` — presets sorted by `(order, id)`, models by id, `effort_levels` the words that model DECLARES. There is no top-level `efforts`: the level vocabulary is gone (Decision 31) |
 | `clan propose --file PATH\|-` | validate a `{"roles": […]}` proposal — one object per role, exactly `{name, preset, writer, skills, why}`, no harness/model/effort — against the catalog, write `clan/proposal.json`, and post it pinned on the bus as `orchestrator`; `-` reads the proposal JSON from stdin (nothing is approved by that) | `{"id": "<bus msg id>", "roles": [names]}`; with `--auto-approve` also `"result"` — the clan landed as `clan.toml` with no board round trip (the approval supersedes the proposal's own message) |
 | `clan approve [MSG_ID]` | land the newest approved clan attachment from `stakeholder` on the bus (or the named message, which must also be from `stakeholder`) as `clan.toml` + writer bits; each role's `preset` is RE-RESOLVED against the catalog at this point, not at propose time, and a preset the catalog no longer ships is a clear error; refuses (exit 1) with no proposal on the bus, when `supersedes` is not the newest proposed clan message, or when the approval is not from `stakeholder` | the clan: `{"channel", "issue", "repo", "checkout", "roles": {role: {harness, model, writer, brief, checkpoint_at, effort}}}` — the preset spread into the three keys it carries |
-| `clan new <checkout> <issue>` | create the channel + zellij session, open the orchestrator, watch and bus tabs | `{"session", "channel", "attach"}` |
-| `clan up` | worktree, config and tab for every role not yet up (idempotent); refuses (exit 1) before any zellij/worktree side effect when a role's model needs an unset env var, naming the role and the missing keys | `{"started": [roles]}` |
+| `clan new <checkout> <issue>` | create the channel and its terminal workspace/session, open the orchestrator, watch and bus tabs | `{"session", "channel", "terminal_backend", "workspace_id", "attach"}` |
+| `clan up` | worktree, config and tab for every role not yet up (idempotent); refuses (exit 1) before any terminal/worktree side effect when a role's model needs an unset env var, naming the role and the missing keys | `{"started": [roles]}` |
 | `clan launch <role>` | run one role's harness inside its tab (interactive kinds exec and replace the process; headless kinds run one round per nudge and log to `rounds.jsonl`) | none — runs until `clan down` |
 | `clan watch` | tail the bus and type a mention line into the mentioned role's pane (runs in its own tab) | none — long-running |
 | `clan status` | per-role rows (`--screen` adds a pane dump each); rows gain `effort` and `model_expired`, top-level `warnings` names expired models | `{"session", "channel", "issue", "repo", "roles": [{role, harness, model, writer, effort, model_expired, tab_id, pane_id, worktree, branch, dirty, last_nudge, context_tokens, checkpoint_at[, screen]}], "warnings", "checkpoints", "presence"}` |
 | `clan nudge <role>` | type one line into a role's pane (`text` optional; default is a mention of the newest message) | `{"role", "pane", "text"}` |
 | `clan checkpoint <role>` | reset a role's context: `/clear`/`/new` (default `--mode clear`; `--mode compact` types `/compact` on both) typed into an interactive pane with a re-orient nudge, or a `reset` marker for headless kinds; refuses a busy role (in `watch.pending` or `watch.nudged`) unless `--force`, exiting 1 with `{"role", "reason": "busy", "hint"}` on stderr; refuses `--mode clear` on the orchestrator outright (`"reason": "orchestrator is never cleared"`, no override — compact is allowed) and refuses a role checkpointing itself (`AGENT_NAME` equals the role, `"reason": "self-checkpoint"`) unless `--force` (Decision 38) | checkpoint record `{"role", "mode", "ts", "context_tokens", "reason"}` |
 | `clan sync <role>` | fast-forward a detached reviewer worktree to the branch tip | `{"role", "worktree", "head"}` |
-| `clan down` | kill the zellij session (`--prune-worktrees` removes its clean worktrees; add `--force` to discard uncommitted changes) and kill any headless round that outlived its pane | `{"session", "worktrees_removed", "rounds_killed"}` |
+| `clan down` | stop the selected clan’s terminals (`--prune-worktrees` removes its clean worktrees; add `--force` to discard uncommitted changes) and kill any headless round that outlived its pane | `{"session", "terminal_backend", "workspace_id", "worktrees_removed", "rounds_killed"}` |
 
 Notes:
 
@@ -73,13 +73,68 @@ Notes:
 - `clan new --unattended` (and `clan up` on an unattended clan) map interactive
   kinds to their headless twins, pre-accepts Claude's workspace trust dialog,
   and sets `CLAN_UNATTENDED=1` in the harness environment.
-- `clan new --zellij-tmp DIR` runs the clan's zellij server under `DIR`
+- `clan new --terminal zellij --zellij-tmp DIR` runs the clan's zellij server under `DIR`
   (tests); the directory must be short, because zellij's socket path is capped
   at 103 bytes.
 - `clan approve` trusts approvals only from the `stakeholder` bus name and
   proposals only from `orchestrator` (docs/DECISIONS.md, Decision 32);
   `--auto-approve` still posts the proposal on the bus — it approves it
   in-process after posting a stakeholder approval, with no board round trip.
+
+## Terminal backends
+
+`clan new --terminal herdr|zellij` overrides `[terminal] backend` in
+`$RATEL_HOME/config.toml`. The default for new clans is `herdr` (minimum 0.9.0).
+Invalid choices and missing binaries fail explicitly; there is no automatic fallback.
+The runtime's persisted `terminal_backend` controls every subsequent command.
+Records without this field mean Zellij. Changing a preference does not migrate a clan;
+stop it with `clan down` before creating it with a different backend. `--unattended`
+remains independent of the backend and still selects the headless harness twins.
+
+HerdR uses a deterministic `ratel-<home-hash>` session with one owned workspace per
+clan. Attach using the command returned by `new` or `status`; plain `herdr` attaches
+to the user's separate default session. Managed configuration and server identity/logs
+live under `$RATEL_HOME/terminal/herdr`. Short Unix socket paths live beneath a private
+`/tmp/ratel-herdr-<uid>` directory. Agent processes retain their normal XDG configuration
+and state paths. Ratel does not install global integrations or change the user's HerdR config.
+
+`clan status` adds `terminal_backend`, `workspace_id` and `attach`. Role rows include
+`terminal: {state, at, stale, source}` for HerdR, or null for Zellij. `state` is one of
+`idle`, `done`, `working`, `blocked`, `unknown`, `unavailable`; `stale` is true when the
+watcher's observation is missing or over ten seconds old. This is separate from the
+existing coordination `state`. Pane/tab IDs may be strings for HerdR; legacy Zellij
+numeric values and numeric-string coercion remain compatible.
+
+For HerdR, `clan nudge` persists a control message and returns `queued: true`. A running
+watcher submits it when the launch is ready. Verdicts and escalations are also retained
+until delivery; blocked/working/unknown/unavailable targets receive no automatic input.
+A delayed response or process crash can cause a duplicate nudge; channel cursors and
+thread IDs still determine unread work. Manual approval remains in the agent terminal.
+Checkpoints check readiness even with `--force`; reorientation is queued until ready.
+Headless reset markers retain their existing boundary-at-next-round behavior.
+
+`clan down` closes owned terminals (including moved ones), preserves unrelated panes
+and workspaces, and leaves the shared server running. It still terminates headless
+process groups and applies the same worktree-pruning preflight. Detaching the client
+keeps launches running. A cold server restart loses launches; native agent auto-resume
+is disabled so it cannot bypass Ratel launch configuration and budgets. Restored shells
+cannot receive queued input. Recover explicitly with `clan down`, then `clan new` and
+approve/up as usual. An unreachable but still-live managed server requires restoring
+its socket before retrying. `ratel doctor --channel NAME` checks workspace and launch
+availability without posting lifecycle reports or changing configuration.
+
+Validation commands (all homes and sessions are temporary):
+
+```bash
+uv run --frozen pytest -q tests/test_clan_herdr.py
+HERDR_TEST_BINARY=/path/to/herdr uv run --frozen pytest -q tests/test_clan_herdr.py
+HERDR_NATIVE_SMOKE=1 HERDR_TEST_BINARY=/path/to/herdr uv run --frozen pytest -q tests/test_clan_herdr.py -k native
+```
+
+Native smoke checks start installed Claude Code/OpenCode without a prompt. Set
+`HERDR_TEST_CLAUDE` / `HERDR_TEST_OPENCODE` for binaries outside PATH. They validate
+startup and detection, without spending model tokens. Full provider workflows remain
+the separately opted-in provider tests.
 
 ## Board HTTP API
 

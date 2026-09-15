@@ -171,7 +171,7 @@ def clan(home, *args):
 
 
 def new_clan(home, repo, issue=42, *extra):
-    return clan(home, "new", str(repo), str(issue), *extra)
+    return clan(home, "new", str(repo), str(issue), "--terminal", "zellij", *extra)
 
 
 # ---- new ---------------------------------------------------------------
@@ -213,7 +213,8 @@ def test_new_names_the_channel_after_the_repo_and_issue(home, repo, fake_zellij)
     out = new_clan(home, repo)
     assert out["channel"] == "harbor-42"
     assert out == {"session": out["session"], "channel": "harbor-42",
-                   "attach": f"zellij attach {out['session']}"}
+                   "attach": f"zellij attach {out['session']}",
+                   "terminal_backend": "zellij", "workspace_id": None}
 
 
 def test_new_writes_clan_toml_with_only_the_orchestrator(home, repo, fake_zellij):

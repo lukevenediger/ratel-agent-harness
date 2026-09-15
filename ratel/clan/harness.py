@@ -452,7 +452,8 @@ def record_launched(paths: ClanPaths, role: str) -> None:
     """The launch half alone — opencode measurement matches on directory and
     only needs the launch gate."""
     update_state(paths, lambda s: s.setdefault("tabs", {}).setdefault(role, {}).update(
-        {"launched": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")}))
+        {"launched": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+         "launch_pid": os.getpid(), "launch_started": _ps_lstart(os.getpid())}))
 
 
 def record_round_session(paths: ClanPaths, role: str, extra: dict) -> None:

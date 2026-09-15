@@ -236,7 +236,7 @@ Setup and headless field notes: [harness-setup.md](harness-setup.md).
 
 ## Clan layer
 
-`ratel/clan/` turns one channel into a clan: a zellij session with one tab
+`ratel/clan/` turns one channel into a clan: a terminal backend with one tab
 per role, per-role harness configs, and a watcher that types @mentions into
 idle agents' terminals.
 
@@ -246,6 +246,8 @@ idle agents' terminals.
 | `clan/state.py` | versioned SQLite runtime state, transactional updates, explicit legacy JSON import |
 | `clan/gitwt.py` | worktrees: writer on `issue-<n>`, reviewers detached at its tip; `extensions.worktreeConfig` |
 | `clan/zellij.py` | thin wrapper over the zellij CLI: session, tabs, `write-chars` nudges, screen dumps |
+| `clan/terminal.py` | backend contract, operator preference, opaque IDs and supervised lifecycle reporting |
+| `clan/herdr.py` | HerdR CLI adapter: one workspace per clan, shared isolated server per Ratel home, identity checks and observations |
 | `clan/harness.py` | per-role briefs, `mcp.json`/`settings.json`/`opencode.json`, launch facade and policy helpers |
 | `clan/adapters.py` | harness argument construction |
 | `clan/supervision.py` | headless subprocess lifecycle, timeout and failure handling |
@@ -279,13 +281,35 @@ Channel-directory additions for a clan channel:
 ```
 
 **The nudge path:** a role posts `@developer …` → the bus line lands → the
-watcher (its own tab) reads it with its own cursor → `zellij write-chars` types
+watcher (its own tab) reads it with its own cursor → the terminal backend submits
 the mention line into the idle role's pane + Enter → the headless harness (or
 the interactive agent) treats it as its next prompt. Nudges are keystrokes, not
 polls; agents keep their own cursors and the watcher owns none. The one thing
 the watcher posts is an `@stakeholder` line when a role's pane shows a harness
 permission dialog — the operator's to answer, not the orchestrator's — and the
 role reads `awaiting-operator` until the screen moves on (Decision 41).
+
+HerdR is the default for new clans. The operator's `config.toml` preference and
+`clan new --terminal` select a backend independently of role harness presets.
+SQLite state records `terminal_backend`, session/workspace IDs and per-role terminal
+identity. Missing backend fields mean Zellij, preserving existing clans without migration.
+HerdR identifiers remain strings; legacy Zellij identifiers remain numeric.
+
+The HerdR watcher observes lifecycle state, persists timestamped `watch.terminal`
+snapshots, and holds prompts while working, blocked, unknown or unavailable. The board
+reads snapshots without backend calls; observations older than ten seconds are stale.
+Manual prompts, verdicts, escalations and checkpoint reorientation have a separate
+transactional `terminal_controls` queue so watcher snapshots cannot overwrite new entries.
+Delivery is at least once across an ambiguous timeout or crash; channel message IDs
+and agent cursors remain the coordination authority.
+
+Before input, HerdR's immutable terminal ID and the role process's PID/start time must
+match. Cross-workspace moves are resolved using terminal identity; cold-restored shells
+and replacement processes fail the check. Ratel disables native agent restore in its
+managed HerdR configuration. A shared server failure affects all its clans. Workspace
+ownership limits routine cleanup, and does not provide agent security isolation.
+Headless lifecycle comes from the Ratel supervisor, including its existing run budgets;
+the watcher publishes it to HerdR for display. HerdR `done` is readiness, never a verdict.
 
 **Headless kinds.** An unattended clan runs `claude-p` / `opencode-run` instead
 of the interactive kinds, one fresh process per round: the kickoff round runs

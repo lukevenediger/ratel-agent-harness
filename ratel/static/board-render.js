@@ -1690,6 +1690,11 @@ function openRole(name) {
   fact("state", stateLabel(r.state, r.headless) + (age ? " for " + age : ""));
   if (r.awaiting) fact("waiting on", r.awaiting.text);   // textContent, like every fact
   fact("confidence", r.confidence);
+  fact("terminal backend", model.terminal_backend || "zellij");
+  if (r.terminal) {
+    fact("terminal activity", r.terminal.state + (r.terminal.stale ? " (stale)" : ""));
+    fact("terminal observed", r.terminal.at);
+  }
   fact("harness", r.harness);
   fact("model", r.model);
   fact("writer", r.writer ? "yes" : "no");
