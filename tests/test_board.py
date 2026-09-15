@@ -617,11 +617,14 @@ def test_sse_delivers_a_bus_recreated_shorter_than_its_offset(home, srv):
     content from byte 0: it must be delivered, not skipped up to the old size."""
     b = Bus(home, "c"); b.post("o", "a long first message " * 20)
     got = {"texts": [], "err": None}
+    ready = threading.Event()
 
     def run():
         try:
             with urllib.request.urlopen(srv + "/api/channels/c/events", timeout=8) as r:
                 for raw in r:
+                    if raw == b"event: hello\n":
+                        ready.set()  # the server has adopted the original tip
                     if raw.startswith(b"data: "):
                         d = json.loads(raw[6:])
                         if isinstance(d, dict) and "text" in d:
@@ -632,7 +635,7 @@ def test_sse_delivers_a_bus_recreated_shorter_than_its_offset(home, srv):
             got["err"] = repr(e)
 
     t = threading.Thread(target=run, daemon=True); t.start()
-    time.sleep(0.7)                               # the stream has adopted the tip
+    assert ready.wait(5), "SSE did not adopt the original tip"
     b.db_path.unlink()
     Bus(home, "c").post("o", "short")             # a fresh, shorter bus
     t.join(6)
