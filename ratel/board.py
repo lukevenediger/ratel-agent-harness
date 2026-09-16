@@ -32,7 +32,7 @@ from .clan.proposal import validate_clan_attachment
 from .clan.session import ClanError, activity
 from .clan.state import revision as state_revision
 from .paths import channel_path, confined, list_channels
-from .schema import validate_name
+from .schema import safe_repo, validate_name
 from .ulid import is_ulid
 from .unfurl import unfurl
 
@@ -50,11 +50,6 @@ def board_page() -> bytes:
 CHANNEL_RE = re.compile(r"^[A-Za-z0-9_.-]+$")
 # `repo` lands in the sidebar from the agent-writable clan.toml. A conservative
 # owner/name slug only; anything else is dropped, never escaped-and-shown.
-REPO_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*/[A-Za-z0-9][A-Za-z0-9._-]*$")
-
-
-def _safe_repo(value: object) -> str | None:
-    return value if isinstance(value, str) and REPO_RE.fullmatch(value) else None
 
 
 # Vendored assets, served at /static/. The requested name is only ever used as a
@@ -425,7 +420,7 @@ class BoardHandler(BaseHTTPRequestHandler):
             state = read_state(ClanPaths(self.home, ch))
             if not isinstance(state, dict):
                 state = {}
-            repo, issue = _safe_repo(cfg.repo), cfg.issue
+            repo, issue = safe_repo(cfg.repo), cfg.issue
             checkout = state.get("checkout") or cfg.checkout
             created = state.get("created")
         return {"name": ch, "agents": bus.presence(), "count": summary["count"],

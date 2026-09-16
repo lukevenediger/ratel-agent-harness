@@ -33,6 +33,14 @@ def validate_name(value: str, kind: str = "channel") -> str:
     return value
 
 
+REPO_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*/[A-Za-z0-9][A-Za-z0-9._-]*$")
+
+
+def safe_repo(value: object) -> str | None:
+    """An agent-written repo value is shown only as an owner/name slug."""
+    return value if isinstance(value, str) and REPO_RE.fullmatch(value) else None
+
+
 def valid_timestamp(value) -> bool:
     if not isinstance(value, str):
         return False
