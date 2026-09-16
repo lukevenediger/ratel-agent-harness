@@ -25,6 +25,27 @@ def confined(root: Path, *parts: str) -> Path:
     return path
 
 
+def list_channels(home: Path) -> list[str]:
+    """Channel names under `home` that hold a database or legacy log, sorted."""
+    from .schema import validate_name
+    try:
+        root = confined(home, "channels")
+    except ValueError:
+        return []
+    if not root.is_dir():
+        return []
+    channels = []
+    for p in root.iterdir():
+        try:
+            validate_name(p.name)
+            if (channel_path(home, p.name, "channel.sqlite3").is_file()
+                    or channel_path(home, p.name, "bus.jsonl").is_file()):
+                channels.append(p.name)
+        except ValueError:
+            continue
+    return sorted(channels)
+
+
 def channel_path(home: Path, channel: str, *parts: str) -> Path:
     from .schema import validate_name
     validate_name(channel, "channel")

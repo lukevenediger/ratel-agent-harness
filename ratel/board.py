@@ -31,7 +31,7 @@ from .clan.config import catalog as clan_catalog
 from .clan.proposal import validate_clan_attachment
 from .clan.session import ClanError, activity
 from .clan.state import revision as state_revision
-from .paths import channel_path, confined
+from .paths import channel_path, confined, list_channels
 from .schema import validate_name
 from .ulid import is_ulid
 from .unfurl import unfurl
@@ -207,26 +207,6 @@ def _clan_signature(home: Path, ch: str) -> str:
         except OSError:
             parts.append(f"{d.name}:-")
     return hashlib.sha1("|".join(parts).encode()).hexdigest()
-
-
-def list_channels(home: Path) -> list[str]:
-    try:
-        root = confined(home, "channels")
-    except ValueError:
-        return []
-    if not root.is_dir():
-        return []
-    channels = []
-    for p in root.iterdir():
-        try:
-            validate_name(p.name)
-            if (channel_path(home, p.name, "channel.sqlite3").is_file()
-                    or channel_path(home, p.name, "bus.jsonl").is_file()):
-                channels.append(p.name)
-        except ValueError:
-            continue
-    return sorted(channels)
-
 
 
 class BoardHandler(BaseHTTPRequestHandler):
