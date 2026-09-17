@@ -783,9 +783,11 @@ preview modals, capped at 512 KiB with `open_links=False`. Previews open only te
 text/plain attachments under the channel's `files/` through `ratel.paths.confined`, and their
 text is scrubbed in `file_text()` itself — the security review of Round 2 showed an OSC 52
 clipboard write in an attachment reaching the terminal because only message text was scrubbed;
-`scrub()` now also drops CR and the Unicode bidi controls. Images and PDFs show name, mime,
-pages and ref, and their bytes are never read. Links are text; nothing is
-opened from the console.
+`scrub()` now also drops CR and the Unicode bidi controls; Round 4 added the bidi marks
+(LRM/RLM/ALM) and the Unicode line separators, and a link URL containing whitespace gets no
+terminal hyperlink so the click target always equals the visible text. Images and PDFs show name,
+mime, pages and ref, and their bytes are never read. Links are text; nothing is opened from the
+console.
 
 **Two helpers moved so `ratel.tui` never imports `ratel.board`.** `list_channels` now lives in
 `ratel/paths.py` and `safe_repo` (the owner/name slug guard for the agent-written `repo`) in

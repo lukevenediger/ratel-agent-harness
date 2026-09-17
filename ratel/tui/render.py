@@ -26,8 +26,9 @@ PREVIEW_MIMES = ("text/markdown", "text/plain")
 PREVIEW_SUFFIXES = (".md", ".txt", ".log")
 
 _ANSI = re.compile(r"\x1b(?:\[[0-?]*[ -/]*[@-~]|[@-Z\\-_])")  # CSI sequences and 2-byte escapes
-# C0 (except \n and \t), DEL, C1, and the Unicode bidi overrides/isolates that reorder a line.
-_CONTROLS = re.compile(r"[\x00-\x08\x0b-\x1f\x7f\x80-\x9f\u202a-\u202e\u2066-\u2069]")
+# C0 (except \n and \t), DEL, C1, the Unicode bidi controls that reorder a line (overrides,
+# isolates, LRM/RLM/ALM marks) and the Unicode line/paragraph separators.
+_CONTROLS = re.compile(r"[\x00-\x08\x0b-\x1f\x7f\x80-\x9f\u061c\u200e\u200f\u2028\u2029\u202a-\u202e\u2066-\u2069]")
 _INLINE = re.compile(
     r"`([^`\n]+)`"                       # 1 code
     r"|\*\*(.+?)\*\*"                    # 2 bold
@@ -39,8 +40,8 @@ _FENCE = re.compile(r"^```[^\n]*\n(.*?)(?:\n```[ \t]*$|\Z)", re.M | re.S)
 
 
 def scrub(text) -> str:
-    """Drop ANSI escape sequences, C0/C1 controls (CR included), DEL and Unicode
-    bidi controls; keep newline and tab."""
+    """Drop ANSI escape sequences, C0/C1 controls (CR included), DEL, Unicode
+    bidi controls and Unicode line separators; keep newline and tab."""
     return _CONTROLS.sub("", _ANSI.sub("", text if isinstance(text, str) else ""))
 
 
@@ -143,7 +144,11 @@ def previewable(att) -> bool:
 
 
 def is_http(url) -> bool:
-    return isinstance(url, str) and url.lower().startswith(("http://", "https://"))
+    """An http(s) URL that may carry a terminal hyperlink. Whitespace is refused:
+    scrub keeps tab and newline, and blank columns would let the visible text
+    differ from the OSC 8 click target."""
+    return (isinstance(url, str) and url.lower().startswith(("http://", "https://"))
+            and not any(c.isspace() for c in url))
 
 
 def _file(att: dict) -> Text:

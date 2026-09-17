@@ -30,6 +30,11 @@ def test_scrub_removes_cr_and_unicode_bidi_controls():
     assert render.scrub("a\rb\u202ac\u202bd\u202ce\u202df\u202eg\u2066h\u2067i\u2068j\u2069k\n") == "abcdefghijk\n"
 
 
+def test_scrub_removes_bidi_marks_and_unicode_line_separators():
+    # LRM/RLM/ALM reorder neutral runs; U+2028/2029 break lines in some terminals and in copies.
+    assert render.scrub("a\u200eb\u200fc\u061cd\u2028e\u2029f") == "abcdef"
+
+
 def test_body_never_parses_rich_markup():
     text = render.body("[bold red]x[/] [link=http://e]y[/link]", colour)
     assert text.plain == "[bold red]x[/] [link=http://e]y[/link]"
@@ -106,6 +111,17 @@ def test_attachment_link_http_is_a_link_and_anything_else_is_inert():
     assert all(not getattr(s.style, "link", None) for s in bad.spans)
     ftp = render.attachment({"type": "link", "href": "ftp://x/y"}, colour)
     assert all(not getattr(s.style, "link", None) for s in ftp.spans)
+
+
+def test_attachment_link_with_whitespace_is_inert():
+    # scrub keeps tab and newline, so blank columns could hide the real host behind the visible one:
+    # the on-screen text and the OSC 8 click target must never differ.
+    for url in ("https://github.com/o/r\t\t\t@evil.example/x", "https://a.example/\nhttps://b.example/",
+                "https://a.example/x y"):
+        text = render.attachment({"type": "link", "url": url}, colour)
+        assert text.plain == "link " + url
+        assert all(not getattr(s.style, "link", None) for s in text.spans), url
+    assert not render.is_http("https://a.example/\t")
 
 
 def test_attachment_tasks_bar_caps_items_and_colours_who():
