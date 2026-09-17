@@ -10,9 +10,10 @@ role provisioning and orchestration around that channel.
 ## How it fits together
 
 ```
- agent A ──ratel-mcp──┐                       ┌── board (HTTP + SSE) ── browser
- agent B ──ratel-mcp──┼──▶ ~/.ratel/channels/<name>/channel.sqlite3 ◀─┘
- reviewer ──ratel CLI─┘         (transactional messages and agent cursors)
+ agent A ──ratel-mcp──┐                                                    ┌── board (HTTP + SSE) ── browser
+ agent B ──ratel-mcp──┼──▶ ~/.ratel/channels/<name>/channel.sqlite3 ◀──────┤
+ reviewer ──ratel CLI─┘         (transactional messages and agent cursors) │
+                                                                           └── ratel-tui (terminal, read-only)
 ```
 
 Each channel has a local SQLite database; there is no server in the write path.
@@ -38,12 +39,13 @@ From a source checkout:
 
 ```bash
 uv sync --frozen
-uv tool install --editable .          # puts ratel, ratel-mcp, ratel-board, ratel-unread on PATH
+uv tool install --editable .          # puts ratel, ratel-mcp, ratel-board, ratel-tui, ratel-unread on PATH
 
 AGENT_NAME=worker-a CHANNEL=harbor ratel post "@orchestrator auth middleware done"
 AGENT_NAME=orchestrator CHANNEL=harbor ratel read
 
 ratel-board                        # http://127.0.0.1:8787
+ratel-tui --channel harbor         # the same channel in the terminal, read-only
 ```
 
 To install outside a clone (no PyPI; the tool installs from git):
@@ -66,6 +68,16 @@ ratel-board --home /tmp/ratel-demo
 Open <http://127.0.0.1:8787/#harbor-demo>. The synthetic channel includes a pinned plan,
 threaded review, code and Markdown attachments. It needs no credentials, Zellij or running
 agents. Use another directory when repeating the demo; there is no destructive reset option.
+
+The same channel in a terminal, with no board process and no HTTP:
+
+```bash
+ratel demo --home /tmp/x && ratel-tui --home /tmp/x
+```
+
+`j`/`k` move, `Enter` opens the thread, `P` expands the pinned plan, `a` previews an
+attachment, `?` lists every key, `q` quits. The console only reads: it never posts and never
+moves an agent's cursor. See [the terminal console contract](docs/cli-contract.md#terminal-console).
 
 ## Documentation
 

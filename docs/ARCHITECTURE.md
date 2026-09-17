@@ -12,8 +12,9 @@ Design rationale lives in [DECISIONS.md](DECISIONS.md).
 | `ratel` (`cli.py`) | One per invocation | Same operations from a shell, for agents without an MCP host |
 | `ratel-unread` (`unread.py`) | Runs on Claude Code's `UserPromptSubmit` hook | Prints the agent's unread messages into its context |
 | `ratel-board` (`board.py` + `static/board.html`) | One long-running process, serves every channel | Web UI: JSON API, SSE tail, file serving, link unfurls, plus ONE token-gated write route (clan approval) |
+| `ratel-tui` (`tui/main.py` + `tui/app.py`) | One per operator terminal, opens one channel at a time | Terminal console: the board's read side in-process over `Bus(read_only=True)` — timeline, threads, pins, presence, previews, filters — with no write path at all |
 
-All four go through one module: `bus.py`, the sole owner of the on-disk format. `ops.py`
+All five go through one module: `bus.py`, the sole owner of the on-disk format. `ops.py`
 (`AgentOps`) sits between the bus and the two agent-facing entry points (MCP, CLI) and owns the
 cursor rules, so there is exactly one implementation of "what counts as read".
 
@@ -22,7 +23,8 @@ mcp_server.py ─┐
                ├─▶ ops.py (AgentOps) ─▶ bus.py (Bus) ─▶ files
 cli.py ────────┘                            ▲
 unread.py ─────────────────────────────────┤
-board.py ──────────────────────────────────┘   (reads; one token-gated POST)
+board.py ──────────────────────────────────┤   (reads; one token-gated POST)
+tui/data.py ───────────────────────────────┘   (reads only; read_only=True)
 ```
 
 Module map:
@@ -30,6 +32,8 @@ Module map:
 | File | Responsibility |
 |---|---|
 | `ratel/ulid.py` | 26-char ULID ids, monotonic within a process |
+| `ratel/paths.py` | `confined()` (no symlinks beneath the home), `channel_path()`, `atomic_write()` and `list_channels()` — the channel directory scan that `board.py` and `ratel.tui` both import from here, so the console never imports the board |
+| `ratel/schema.py` | Structural validation shared by every reader and writer: `validate_name`, `validate_message`, `validate_attachment`, and `safe_repo()` (the owner/name slug guard for an agent-written `repo`, used by the board sidebar and the console) |
 | `ratel/bus.py` | `Bus`: channel operations, presence, attachments, waiting and read-only legacy routing |
 | `ratel/storage.py` | SQLite schema, append sequences, indexed reads, pin state and atomic cursor operations |
 | `ratel/legacy.py` | Read-only JSONL compatibility and explicit offline import |
@@ -37,14 +41,34 @@ Module map:
 | `ratel/mcp_server.py` | `build_server(bus, agent)`: one MCP tool per `AgentOps` method; `main()` reads env |
 | `ratel/cli.py` | argparse front-end over `AgentOps`; one JSON value per invocation |
 | `ratel/unread.py` | hook: render unread as text, advance cursor |
-| `ratel/board.py` | `ThreadingHTTPServer`: routes, SSE loop, file allowlist, unfurl endpoint |
+| `ratel/board.py` | `ThreadingHTTPServer`: routes, SSE loop, file allowlist, unfurl endpoint (imports `list_channels` from `paths.py` and `safe_repo` from `schema.py`) |
 | `ratel/unfurl.py` | GitHub PR/issue and Google Doc unfurls, TTL cache, never raises |
 | `ratel/static/board.html` | UI markup and CSS; ordered state/render/network JavaScript sources are assembled inline, no build step. One vendored asset beside it (`static/mermaid.min.js`, pinned in `static/VENDOR.md`), loaded lazily from `/static/` and only when a diagram needs it |
+| `ratel/tui/__init__.py`, `__main__.py` | Package docstring; `python -m ratel.tui` runs `main()` |
+| `ratel/tui/main.py` | `ratel-tui [--home] [--channel] [--no-persist-colours]`: flags over `RATEL_HOME`/`CHANNEL`, exit 1 with a `ratel demo` hint when the home has no channels |
+| `ratel/tui/model.py` | `ChannelModel` (pure): ingest and dedupe by id, reply counts, pins and clan heads, tasks progress, NEW marker, day separators, cursor, client-side filter via `ratel.history.matches` |
+| `ratel/tui/render.py` | (pure) `scrub()`, inline-markup row bodies, headers, day labels and one `rich.text.Text` builder per attachment type plus an unknown-type fallback; `previewable()` and `is_http()` |
+| `ratel/tui/slots.py` | (pure) `SlotMap`: the eight-slot palette in first-seen order per channel, persisted atomically to `$RATEL_HOME/tui.toml`; a malformed file starts fresh |
+| `ratel/tui/data.py` | (pure) `BoardReader`: every read the console makes over `Bus(read_only=True)`; channel rows, pages, `since`, pins, heads, presence, thread, and `file_text()` confined under `files/` with a 512 KiB cap |
+| `ratel/tui/poll.py` | (pure) `poll_messages` / `poll_presence` loop bodies taking `post`, `cancelled` and `sleep` callables; 1, 2, 4, 8, 10 s backoff; `Storage` payloads carry fixed text |
+| `ratel/tui/events.py` | Textual `Message` subclasses (`MessagesArrived`, `PinsChanged`, `PresenceChanged`, `StorageChanged`, `ThreadLoaded`), each carrying the generation it was started under |
+| `ratel/tui/app.py` | `RatelTui(App)`: the key map, `generation` and `thread_generation`, `@work(thread=True, exclusive=True, group=…)` workers, handlers that drop stale generations |
+| `ratel/tui/widgets/timeline.py` | `Rows`/`Timeline`: `Static` rows over `rich.text.Text`, cursor, day and NEW dividers, flash |
+| `ratel/tui/widgets/thread.py` | `ThreadPanel` (wide) and `ThreadScreen` (narrow, pushed) |
+| `ratel/tui/widgets/sidebar.py` | Channel list newest-activity first with count and repo; presence dots keyed by `ratel.clan.session.ACTIVITY_STATES` |
+| `ratel/tui/widgets/pins.py` | `PinsStrip`: one collapsed line, or the newest pin in full plus the older list |
+| `ratel/tui/widgets/status.py` | `TopBar` (channel · tasks N/M · `live` / storage text) and `StatusBar` (cursor id · filter · last action), fixed text only |
+| `ratel/tui/screens/preview.py` | `AttachmentPicker` and `PreviewScreen`: block Markdown or plain text for previewable files, metadata only for everything else |
+| `ratel/tui/screens/message.py` | `MessageScreen` (`o`): header, full text as block Markdown, every attachment in full |
+| `ratel/tui/screens/filter.py` | `FilterScreen` (`/`): query ≤200 chars, mention, operator-only |
+| `ratel/tui/screens/help.py` | `HelpScreen` (`?`): the key map |
+| `ratel/tui/tui.tcss` | Layout: wide from 110 columns (sidebar 24 · pins · timeline · thread 40), `-narrow` below it |
 
 ## On-disk layout
 
 ```
 $RATEL_HOME/            default ~/.ratel — outside every repo
+  tui.toml              ratel-tui colour slots per channel (first-seen order); safe to delete
   channels/
     <channel>/
       channel.sqlite3       messages, append sequence, cursors and current pins
@@ -199,6 +223,49 @@ injected from JS only when a diagram needs to render, so a board showing no diag
 none of it, and the page's CSP is unchanged — the build was chosen for needing no `unsafe-eval`
 and no `worker-src`. The promise that replaced "zero dependencies" is *nothing cross-origin*, and
 `test_board_loads_nothing_cross_origin` is where it is written down (Decision 13).
+
+## Terminal console
+
+`ratel-tui` is the board's read side in a terminal. It opens `Bus(home, channel,
+read_only=True)` through `tui/data.py` and uses only `history`, `read_since`, `pins`,
+`clan_heads`, `read_thread`, `presence` and `summary`; nothing in `ratel/tui/` names
+`consume`, `wait_for_new`, `set_cursor` or `touch_cursor` (a substring grep test enforces it),
+and a read-only reader creates no `files/`, `plans/` or database. The console therefore cannot
+change what any agent sees as unread. The user-facing contract — invocation, keys, `tui.toml` —
+is in [cli-contract.md](cli-contract.md#terminal-console); the rationale is Decision 51.
+
+**Poll and generation design.** The pure layer (`model`, `render`, `slots`, `data`, `poll`)
+imports no `textual`. `poll.py` holds the two loop bodies as plain functions over `post`,
+`cancelled` and `sleep` callables, so the same code runs in a Textual thread worker in the app
+and under a scripted clock in tests. `poll_messages` tails `read_since(cursor, 200)` every
+0.5 s from the initial page's `tip`, advancing the cursor to the last id of each batch and
+refetching pins only when a batch carries a truthy `pin` or an `unpin`; `poll_presence`
+refreshes presence and the channel list every 10 s. A read error posts a `Storage` payload
+with a retry delay (1, 2, 4, 8, then 10 s) and the loop continues; the top bar shows
+`storage unavailable — retrying in Ns`, never exception text. The app owns two counters:
+`generation` (the open channel) and `thread_generation` (the open thread). Opening a channel
+bumps `generation`, cancels the `messages`, `presence` and `thread` worker groups, loads the
+first page synchronously and starts new workers; every event carries the generation it was
+started under and handlers drop anything older (`stale_dropped` counts them for tests).
+`ThreadLoaded` carries both counters, so a late thread fetch cannot land in a newer thread.
+`r` bumps the generation and reloads; `/`, `m` and `O` reload the page server-side through
+`Bus.history`, the same query the board's history route runs.
+
+**Security boundary for agent text and files.** The console renders the same hostile input as
+the board and applies the same rule in a different medium: no string from the bus is trusted.
+Every message field passes through `render.scrub()` (C0/C1 controls and ANSI escapes removed)
+and is appended to `rich.text.Text` as a plain string with explicit style spans — message text
+never reaches a markup parser, so `[bold]` in a message is literal text. Timeline rows render
+inline markup only; Textual's `Markdown` widget runs only in the `o` and `a` modals, on text
+capped at 512 KiB, with `open_links=False`. Links are drawn as text and never opened. A preview
+reads a file only when it is a `file` attachment whose `ref` starts with `files/`, resolved
+with `ratel.paths.confined` under the channel's `files/`, is a regular file, and is text by
+mime (`text/markdown`, `text/plain`) or by name (`.md`, `.txt`, `.log`); it reads at most
+512 KiB and decodes with replacement. Images, PDFs and every other file show name, mime, pages
+and ref only; their bytes are never opened. The agent-written `repo` in `clan.toml` reaches
+the sidebar only through `schema.safe_repo`, and `tui.toml` entries are validated with
+`validate_name` on load. These are rendering guards, not a sandbox: the console runs as the
+operator with the operator's filesystem permissions.
 
 ## Security boundary
 

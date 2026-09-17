@@ -12,6 +12,31 @@ uv run pytest -q
 Tests use temporary homes. Live provider tests are opt-in; optional runtime tests may skip
 when their prerequisites are missing. Never point a test or smoke run at the live `~/.ratel`.
 
+Async code is tested from plain sync tests with `asyncio.run()`; there is no pytest async
+plugin. For the terminal console, `tests/conftest.py` provides `run_app(app, script, size)`:
+`script` is a coroutine taking Textual's `Pilot`, run inside `App.run_test(size=...)`, and its
+return value comes back to the test. `screen_text(app)` dumps the current screen as plain text,
+and the `demo_home` fixture seeds `ratel.demo.seed(tmp_path / "demo")` and returns the home.
+Most console tests need no Pilot at all: `ratel/tui/{model,render,slots,data,poll}.py` import no
+`textual` and are tested directly.
+
+```python
+from conftest import run_app, screen_text
+from ratel.tui.app import RatelTui
+
+
+def test_enter_opens_the_thread_panel(demo_home):
+    app = RatelTui(demo_home, "harbor-demo")
+
+    async def script(pilot):
+        await pilot.press("enter")
+        await pilot.pause()
+        return app.query_one("#thread").has_class("-open"), screen_text(app)
+
+    opened, text = run_app(app, script, size=(140, 40))
+    assert opened and "thread" in text
+```
+
 ```bash
 uv run --frozen ruff check .
 uv run --frozen python scripts/verify-wheel.py
@@ -43,6 +68,7 @@ Choose a new, nonexistent home directory:
 ```bash
 uv run ratel demo --home /tmp/ratel-demo
 uv run ratel-board --home /tmp/ratel-demo --port 8791
+uv run ratel-tui --home /tmp/ratel-demo      # the same channel in the terminal
 ```
 
 Open the `harbor-demo` channel. It includes pins, threads, Markdown and code attachments and

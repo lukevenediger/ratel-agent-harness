@@ -346,5 +346,95 @@ review and local attachments. `PATH` must be a new directory; even an empty exis
 is refused. `--home` is mandatory: neither `RATEL_HOME` nor the default live home is selected
 implicitly. The channel defaults to `harbor-demo`. The JSON report contains `home`, `channel`,
 `messages` and the root `thread` ID. No credentials, providers or clan processes are used.
-Run `ratel-board --home PATH` to browse the result. Repeating the command requires a new path;
-there is no overwrite or reset flag.
+Run `ratel-board --home PATH` or `ratel-tui --home PATH` to browse the result. Repeating the
+command requires a new path; there is no overwrite or reset flag.
+
+## Terminal console
+
+`ratel-tui [--home PATH] [--channel NAME] [--no-persist-colours]` opens one channel in the
+terminal. It is a read-only twin of the board that reads the channel in-process through
+`Bus`: no `ratel-board` process, no HTTP, no token.
+
+**Invocation.** Flags win over the environment. `--home` falls back to `RATEL_HOME`, then
+`~/.ratel`; `--channel` falls back to `CHANNEL`, then the channel with the newest message.
+Inside a clan role's shell both variables are already set, so a bare `ratel-tui` opens that
+clan's channel. Two conditions exit 1 with a message on stderr and nothing on the screen: a
+home with no channels prints `ratel-tui: no channels in <home>.` followed by a
+`ratel demo --home <home>/demo` hint, and a `--channel` that does not exist lists the known
+channels. The console runs until `q`; it prints no JSON.
+
+**Read-only guarantee.** Every read goes through `Bus(home, channel, read_only=True)` and uses
+only `history`, `read_since`, `pins`, `clan_heads`, `read_thread`, `presence` and `summary`.
+The package never calls `consume`, `wait_for_new`, `set_cursor` or `touch_cursor`, a test greps
+`ratel/tui/` for those four names as plain substrings, and another proves a read-only reader
+creates no `files/` or `plans/` directory and no database for a legacy or missing channel. An
+agent's cursor, and therefore its unread state, is untouched by anything the console does.
+
+**Live.** Messages are polled with `read_since(cursor, 200)` every 0.5 s from the page tip;
+presence and the channel list every 10 s; pins are refetched only when a batch carries a truthy
+`pin` or an `unpin`. A live arrival gets a **NEW** divider (before the first one while the cursor
+is not on the last row) and a brief flash; the view follows only when already at the bottom.
+A read failure shows `storage unavailable — retrying in Ns` in the top bar, fixed text and never
+exception text, and the loop retries after 1, 2, 4, 8 and then every 10 s until a read succeeds,
+when the top bar returns to `live`. The initial page retries after 1 s under the same text.
+Switching channels bumps a generation counter and cancels the workers; a late result from an
+earlier generation is dropped.
+
+**Layout.** From 110 columns: sidebar (24, channels newest-activity first with count and repo,
+then the presence dots of the open channel, `●` online and `○` offline), pins strip (one line
+collapsed), timeline, thread panel (40). Below 110 columns the sidebar is hidden (`s` overlays
+it) and a thread opens as its own screen. Top bar: channel · `tasks N/M` (from the newest
+pinned task list) · `live` or the storage text. Status bar: selected message id · active filter
+(`q:<text>`, `@agent`, `operator`, or `no filter`) · last action.
+
+**Keys.**
+
+| Key | Action |
+|---|---|
+| `j`/`k`, arrows | move |
+| `g` / `G` | first / last row |
+| `Enter` | open the thread of the selected message (a reply opens its parent's thread); in the sidebar, select the channel |
+| `Esc` | close the sidebar overlay, the thread, or the open modal |
+| `Tab` | cycle focus |
+| `n` / `p` | next / previous channel |
+| `1`–`9` | jump to the n-th channel in the sidebar |
+| `s` | sidebar (overlay below 110 columns) |
+| `t` | toggle the thread of the selected message |
+| `P` | expand the pins strip: the newest pin in full plus the older list |
+| `o` | message modal: header, full text as block Markdown, every attachment in full |
+| `a` | attachment picker, then preview |
+| `/` | filter modal: text (≤200 chars), `@agent`, operator-only; Enter applies, Esc keeps the current filter |
+| `m` | cycle the mention filter over the agents seen on the channel, then off |
+| `O` | toggle operator-only |
+| `[` | load the older page (`next_before`) |
+| `N` | jump to the NEW divider and clear it |
+| `r` | reload the channel list and the current page |
+| `?` | this key map |
+| `q` | quit |
+
+Filters run server-side through `Bus.history`, exactly as the board's history route: `/`, `m`
+and `O` each reload the page. Timeline rows render inline markup only (bold, emphasis, code,
+strike, `@name` in that agent's colour, fences cut at 6 lines with `… +N lines (o)`); block
+Markdown appears only in the `o` and `a` modals, capped at 512 KiB, with links inert. A preview
+opens only a `file` attachment under `files/` whose mime is `text/markdown` or `text/plain` or
+whose name ends in `.md`, `.txt` or `.log`; `text/plain` shows verbatim, the rest as Markdown.
+Any other file shows name · mime · pages · ref and its bytes are never read. Links render as
+text; nothing is opened.
+
+**Colour slots.** Agents are coloured from the board's eight-slot palette in first-seen order
+per channel, persisted to `$RATEL_HOME/tui.toml` so a later agent never re-colours an earlier
+one:
+
+```toml
+# ratel-tui colour slots: first-seen agent order per channel. Safe to delete.
+
+[slots."harbor-demo"]
+"orchestrator" = 1
+"developer" = 2
+```
+
+The file is written atomically after each new assignment. A malformed file, or one without a
+`slots` table, starts a fresh map that the next assignment overwrites; inside a valid file every
+entry that is not `valid channel → valid agent → positive integer` is dropped. A write failure
+is ignored so a read-only home still gets a console. `--no-persist-colours` neither reads nor
+writes the file: slots live in memory for that run.
