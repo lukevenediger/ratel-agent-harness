@@ -186,23 +186,38 @@ def test_sidebar_cursor_survives_the_presence_refresh_and_follows_a_real_switch(
         app = pilot.app
         await pilot.pause()
         sidebar = app.query_one("#sidebar", Sidebar)
-        names = [c["name"] for c in app.channels]
-        assert names[sidebar.index] == "harbor-demo"
+
+        def highlighted():
+            return sidebar.channels[sidebar.index]["name"]
+
+        def refresh():   # what the presence worker posts every 10 s
+            app.post_message(events.PresenceChanged(poll.PresenceUpdate(
+                app.generation, app.reader.presence("harbor-demo"), app.reader.channels())))
+
+        start = sidebar.index
+        assert highlighted() == "harbor-demo"
         sidebar.focus()
         await pilot.press("k")
         moved = sidebar.index
-        assert names[moved] == "aaa"
-        # what the presence worker posts every 10 s must not move the reader's cursor
-        app.post_message(events.PresenceChanged(poll.PresenceUpdate(
-            app.generation, app.reader.presence("harbor-demo"), app.reader.channels())))
+        assert moved != start and highlighted() != "harbor-demo"
+        target = highlighted()
+        refresh()
         await pilot.pause()
-        assert sidebar.index == moved and app.channel == "harbor-demo"
+        assert sidebar.index == moved and highlighted() == target and app.channel == "harbor-demo"
+        # a message elsewhere re-sorts the list: the highlight follows the name, not the index
+        other = sidebar.channels[-1]["name"]   # the only channel sorting below the target
+        assert other != target
+        Bus(demo_home, other).post("a", "y")
+        refresh()
+        await pilot.pause()
+        assert sidebar.channels[0]["name"] == other
+        assert highlighted() == target and sidebar.index != moved
         await pilot.press("enter")
         await pilot.pause()
-        assert app.channel == "aaa" and names[sidebar.index] == "aaa"
+        assert app.channel == target and highlighted() == target
         await pilot.press("n")   # a real switch moves the highlight to the open channel
         await pilot.pause()
-        assert app.channel == "harbor-demo" and names[sidebar.index] == "harbor-demo"
+        assert app.channel != target and highlighted() == app.channel
     run_app(app_for(demo_home), script, WIDE)
 
 
@@ -345,6 +360,8 @@ def test_filter_modal_enter_applies_from_the_operator_checkbox_and_the_mention_i
         await pilot.pause()
         await pilot.press("slash")
         app.screen.query_one("#operator", Checkbox).focus()
+        await pilot.pause()
+        assert app.screen.focused.id == "operator"
         await pilot.press("space", "enter")
         await pilot.pause()
         assert not isinstance(app.screen, FilterScreen)
