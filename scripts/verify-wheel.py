@@ -24,6 +24,7 @@ from ratel.board import board_page, make_server
 from ratel.bus import Bus
 from ratel.clan.config import load_catalog, load_models
 from ratel.clan.harness import PKG, SKILL_MD
+from ratel.tui.app import RatelTui
 from mcp import ClientSession, StdioServerParameters
 from mcp.client.stdio import stdio_client
 
@@ -64,7 +65,15 @@ async def mcp():
         assert not result.is_error
 asyncio.run(mcp())
 assert bus.read_all()[-1]['text'] == 'Installed wheel MCP smoke'
-print(json.dumps({'wheel': 'ok', 'assets': 'ok', 'demo': 'ok', 'http': 'ok', 'mcp': 'ok'}))
+
+async def tui():
+    app = RatelTui(home, 'harbor-demo')
+    async with app.run_test(size=(100, 30)) as pilot:
+        await pilot.pause(0.5)
+        assert len(app.query('#timeline .msg')) == 7, 'the console composes one row per demo message'
+        await pilot.press('q')
+asyncio.run(tui())
+print(json.dumps({'wheel': 'ok', 'assets': 'ok', 'demo': 'ok', 'http': 'ok', 'mcp': 'ok', 'tui': 'ok'}))
 '''
 
 
