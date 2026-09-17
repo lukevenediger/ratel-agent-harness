@@ -113,15 +113,23 @@ def test_attachment_link_http_is_a_link_and_anything_else_is_inert():
     assert all(not getattr(s.style, "link", None) for s in ftp.spans)
 
 
-def test_attachment_link_with_whitespace_is_inert():
-    # scrub keeps tab and newline, so blank columns could hide the real host behind the visible one:
-    # the on-screen text and the OSC 8 click target must never differ.
-    for url in ("https://github.com/o/r\t\t\t@evil.example/x", "https://a.example/\nhttps://b.example/",
-                "https://a.example/x y"):
+def _link_targets(text):
+    return [s.style.link for s in text.spans if getattr(s.style, "link", None)]
+
+
+def test_attachment_link_outside_printable_ascii_is_inert():
+    # The visible text and the OSC 8 click target must never differ. scrub keeps tab and
+    # newline (blank columns), and zero-width characters render as nothing at all, so only
+    # printable ASCII may carry a hyperlink; an IDN URL is the accepted cost.
+    ok = "https://ok.example/a%20b?q=1&r=2#f"
+    assert _link_targets(render.attachment({"type": "link", "url": ok}, colour)) == [ok]
+    for url in ("https://github.com/o/r\t\t\t@evil.example/x", "https://a.example/\nhttps://evil.example/",
+                "https://a.example/x y@evil.example/", "https://ok.example\u200b@evil.example/",
+                "https://ok.example\ufeff@evil.example/", "https://ok.example\u00a0@evil.example/",
+                "https://b\u00fccher.example/x"):
         text = render.attachment({"type": "link", "url": url}, colour)
-        assert text.plain == "link " + url
-        assert all(not getattr(s.style, "link", None) for s in text.spans), url
-    assert not render.is_http("https://a.example/\t")
+        assert _link_targets(text) == [], url
+        assert text.plain == "link " + url and "example" in text.plain   # de-linked, not dropped
 
 
 def test_attachment_tasks_bar_caps_items_and_colours_who():

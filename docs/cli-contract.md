@@ -420,9 +420,10 @@ opens only a `file` attachment under `files/` whose mime is `text/markdown` or `
 whose name ends in `.md`, `.txt` or `.log`; `text/plain` shows verbatim, the rest as Markdown.
 Any other file shows name · mime · pages · ref and its bytes are never read. Message and
 attachment text are scrubbed of ANSI escapes, control characters, Unicode bidi controls and
-Unicode line separators before they reach the screen. Links render as text and the console opens
-nothing; an `http(s)` link attachment whose URL contains no whitespace also carries a terminal
-hyperlink to exactly the visible text, so the click target can never differ from what is shown.
+Unicode line separators before they reach the screen. The console never opens a link. `http` and
+`https` link attachments whose URL is printable ASCII are emitted as terminal hyperlinks (OSC 8),
+so the terminal may open them on click and the click target always equals the visible text; every
+other URL (whitespace, zero-width characters, non-ASCII) renders as inert text.
 
 **Colour slots.** Agents are coloured from the board's eight-slot palette in first-seen order
 per channel, persisted to `$RATEL_HOME/tui.toml` so a later agent never re-colours an earlier

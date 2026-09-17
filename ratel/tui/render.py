@@ -37,6 +37,7 @@ _INLINE = re.compile(
     r"|(?<!\w)_([^_\n]+?)_(?!\w)"        # 5 em
     r"|" + MENTION_RE.pattern)           # 6 mention
 _FENCE = re.compile(r"^```[^\n]*\n(.*?)(?:\n```[ \t]*$|\Z)", re.M | re.S)
+_URL_SAFE = re.compile(r"^[\x21-\x7e]+$")   # printable ASCII, no space: RFC 3986 percent-encodes the rest
 
 
 def scrub(text) -> str:
@@ -144,11 +145,12 @@ def previewable(att) -> bool:
 
 
 def is_http(url) -> bool:
-    """An http(s) URL that may carry a terminal hyperlink. Whitespace is refused:
-    scrub keeps tab and newline, and blank columns would let the visible text
-    differ from the OSC 8 click target."""
+    """An http(s) URL that may carry a terminal hyperlink: printable ASCII only,
+    so the visible text can never differ from the OSC 8 click target. scrub keeps
+    tab and newline, and zero-width characters (U+200B, U+FEFF, ...) render as
+    nothing at all; an IDN URL is the accepted cost and renders as plain text."""
     return (isinstance(url, str) and url.lower().startswith(("http://", "https://"))
-            and not any(c.isspace() for c in url))
+            and _URL_SAFE.match(url) is not None)
 
 
 def _file(att: dict) -> Text:

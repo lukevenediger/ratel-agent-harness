@@ -261,10 +261,10 @@ message text never reaches a markup parser, so
 it reaches any preview widget, so an OSC 52 clipboard write or a CSI sequence in a `.md` file
 cannot reach the terminal; a failed read shows fixed text, never the exception. Timeline rows render
 inline markup only; Textual's `Markdown` widget runs only in the `o` and `a` modals, on text
-capped at 512 KiB, with `open_links=False`. Links are drawn as text and never opened; an `http(s)`
-link attachment whose URL contains no whitespace also carries a terminal hyperlink to exactly the
-visible text (a tab or newline could hide the real host behind blank columns), any other URL is
-inert. A preview
+capped at 512 KiB, with `open_links=False`. The console itself never opens a link. An `http`/`https`
+link attachment whose URL is printable ASCII is emitted as a terminal hyperlink (OSC 8) to exactly
+the visible text, so the terminal may open it on click; every other URL — one with whitespace, a
+zero-width character, or non-ASCII (IDN) — is inert text. A preview
 reads a file only when it is a `file` attachment whose `ref` starts with `files/`, resolved
 with `ratel.paths.confined` under the channel's `files/`, is a regular file, and is text by
 mime (`text/markdown`, `text/plain`) or by name (`.md`, `.txt`, `.log`); it reads at most

@@ -784,10 +784,11 @@ text/plain attachments under the channel's `files/` through `ratel.paths.confine
 text is scrubbed in `file_text()` itself — the security review of Round 2 showed an OSC 52
 clipboard write in an attachment reaching the terminal because only message text was scrubbed;
 `scrub()` now also drops CR and the Unicode bidi controls; Round 4 added the bidi marks
-(LRM/RLM/ALM) and the Unicode line separators, and a link URL containing whitespace gets no
-terminal hyperlink so the click target always equals the visible text. Images and PDFs show name,
-mime, pages and ref, and their bytes are never read. Links are text; nothing is opened from the
-console.
+(LRM/RLM/ALM) and the Unicode line separators, and only a printable-ASCII `http(s)` URL gets a
+terminal hyperlink (OSC 8), so the click target always equals the visible text — a zero-width
+character would hide a second host with no visual cue, and an IDN URL rendering as plain text is
+the accepted cost. Images and PDFs show name, mime, pages and ref, and their bytes are never read.
+The console itself opens nothing.
 
 **Two helpers moved so `ratel.tui` never imports `ratel.board`.** `list_channels` now lives in
 `ratel/paths.py` and `safe_repo` (the owner/name slug guard for the agent-written `repo`) in
