@@ -150,7 +150,7 @@ def is_http(url) -> bool:
     tab and newline, and zero-width characters (U+200B, U+FEFF, ...) render as
     nothing at all; an IDN URL is the accepted cost and renders as plain text."""
     return (isinstance(url, str) and url.lower().startswith(("http://", "https://"))
-            and _URL_SAFE.match(url) is not None)
+            and _URL_SAFE.fullmatch(url) is not None)
 
 
 def _file(att: dict) -> Text:

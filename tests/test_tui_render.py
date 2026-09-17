@@ -126,7 +126,7 @@ def test_attachment_link_outside_printable_ascii_is_inert():
     for url in ("https://github.com/o/r\t\t\t@evil.example/x", "https://a.example/\nhttps://evil.example/",
                 "https://a.example/x y@evil.example/", "https://ok.example\u200b@evil.example/",
                 "https://ok.example\ufeff@evil.example/", "https://ok.example\u00a0@evil.example/",
-                "https://b\u00fccher.example/x"):
+                "https://b\u00fccher.example/x", "https://ok.example/x\n"):   # `$` would accept a trailing \n
         text = render.attachment({"type": "link", "url": url}, colour)
         assert _link_targets(text) == [], url
         assert text.plain == "link " + url and "example" in text.plain   # de-linked, not dropped
