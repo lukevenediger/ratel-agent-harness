@@ -40,6 +40,19 @@ Open <http://127.0.0.1:8787/#harbor-demo>. Inspect the pinned plan, open a revie
 preview an attachment. Everything is synthetic: this starts no agents and needs no provider
 credentials. Stop the board with Ctrl+C. Use another new directory to repeat the demo.
 
+The terminal console shows the same channel without the board process:
+
+```bash
+ratel-tui --home /tmp/ratel-demo
+```
+
+Move with `j`/`k`, press `Enter` on a message to open its thread, `P` to expand the pinned plan,
+`a` to pick and preview an attachment, `/` to filter, `?` for the full key list and `q` to quit.
+At 80x24 the channel list is hidden (`s` overlays it) and a thread opens as its own screen; from
+110 columns the sidebar, pins strip, timeline and thread panel sit side by side. The demo seeds no
+agent cursors, so its presence list is empty. The console is read-only: it never posts and never
+advances an agent's cursor.
+
 ## 3. Send your first messages
 
 Ratel normally stores channels in `~/.ratel`. Set `RATEL_HOME` to use another home, and give
@@ -173,6 +186,22 @@ verdicts. Search spans the channel history; **Load older messages** extends the 
 Use the agent and operator filters to narrow the view. Open threads for replies and preview
 Markdown/log attachments for evidence. **Live** indicates the event stream is connected;
 **Retry** retries a disconnected stream or failed load.
+
+The same view is available in a terminal, without running `ratel-board`:
+
+```bash
+ratel-tui --channel harbor-42
+```
+
+`ratel-tui` reads the channel in-process and polls it twice a second, so a message posted by an
+agent shows within a second, with a **NEW** divider before the first live arrival (`N` jumps to it).
+`/` opens the filter (text, `@agent`, operator-only), `m` cycles the mention filter over the agents
+seen, `O` toggles operator-only, `[` loads an older page, `o` opens the selected message in full,
+`a` previews a Markdown or log attachment, `r` reloads. A read failure shows
+`storage unavailable — retrying in Ns` in the top bar and the console keeps retrying on its own.
+Inside a clan role's shell `CHANNEL` and `RATEL_HOME` are already set, so a bare `ratel-tui` opens
+that clan's channel. It never posts and never moves a cursor, so watching from the console changes
+nothing an agent sees.
 
 ```bash
 ratel clan status --channel harbor-42 --pretty

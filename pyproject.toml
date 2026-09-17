@@ -17,7 +17,7 @@ classifiers = [
   "Programming Language :: Python :: 3.13",
   "Programming Language :: Python :: 3.14",
 ]
-dependencies = ["mcp>=2.1,<3"]
+dependencies = ["mcp>=2.1,<3", "textual>=6,<7"]
 
 [project.urls]
 Homepage = "https://github.com/lukevenediger/ratel-agent-harness"
@@ -29,6 +29,7 @@ ratel = "ratel.cli:main"
 ratel-mcp = "ratel.mcp_server:main"
 ratel-unread = "ratel.unread:main"
 ratel-board = "ratel.board:main"
+ratel-tui = "ratel.tui.main:main"
 ratel-fake-harness = "ratel.clan.fake_harness:main"
 
 [dependency-groups]

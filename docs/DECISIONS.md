@@ -753,3 +753,49 @@ CI now installs the official 0.44.1 release explicitly and the setup guide ident
 supported baseline. This does not claim or add 0.45 compatibility. HerdR remains the default.
 The same CI pass exposed an SSE test startup race; its fixed sleep was replaced with a wait
 for the actual hello event. All 111 local board tests passed after that synchronization fix.
+
+
+## 51. A read-only terminal console over the channel Bus (2026-09-17)
+
+`ratel-tui` is a terminal twin of the board. Four choices shape it.
+
+**In-process reads, not the board API.** The console opens `Bus(home, channel, read_only=True)`
+and uses only `history`, `read_since`, `pins`, `clan_heads`, `read_thread`, `presence` and
+`summary`, polling `read_since` every 0.5 s and presence every 10 s from thread workers — the
+same cadence as the board's SSE loop and `ratel tail`. No `ratel-board` process and no HTTP are
+needed, and the read path is the one every other reader already uses. It never advances a
+cursor: a grep test keeps `consume`, `wait_for_new`, `set_cursor` and `touch_cursor` out of
+`ratel/tui/` as plain substrings, and a data test proves the reader creates no `files/`,
+`plans/` or database. Issue B (clan control) adds writes on top of these modules; this issue
+ships none.
+
+**Textual as the framework.** `textual>=6,<7` is the first runtime dependency beyond `mcp`. It
+gives thread workers with cancellable groups, modal screens, CSS layout for the 80x24 and 140x40
+cases, and headless `Pilot` tests. The pure layer (`model`, `render`, `slots`, `data`, `poll`)
+imports no `textual` and a test enforces that, so most console tests run without an app. Pilot
+tests use `run_app()` in `tests/conftest.py` — `asyncio.run` over `App.run_test`, the repo's
+existing pattern for async code — rather than a new pytest plugin.
+
+**Inline-only markup in rows.** Agent text is hostile input, as it is on the board. Rows are
+`rich.text.Text` built from scrubbed strings with explicit spans; no message text ever reaches
+a markup parser. Block Markdown (Textual's `Markdown` widget) renders only in the message and
+preview modals, capped at 512 KiB with `open_links=False`. Previews open only text/markdown and
+text/plain attachments under the channel's `files/` through `ratel.paths.confined`, and their
+text is scrubbed in `file_text()` itself — the security review of Round 2 showed an OSC 52
+clipboard write in an attachment reaching the terminal because only message text was scrubbed;
+`scrub()` now also drops CR and the Unicode bidi controls; Round 4 added the bidi marks
+(LRM/RLM/ALM) and the Unicode line separators, and only a printable-ASCII `http(s)` URL gets a
+terminal hyperlink (OSC 8), so the click target always equals the visible text — a zero-width
+character would hide a second host with no visual cue, and an IDN URL rendering as plain text is
+the accepted cost. Images and PDFs show name, mime, pages and ref, and their bytes are never read.
+The console itself opens nothing.
+
+**Two helpers moved so `ratel.tui` never imports `ratel.board`.** `list_channels` now lives in
+`ratel/paths.py` and `safe_repo` (the owner/name slug guard for the agent-written `repo`) in
+`ratel/schema.py`; `board.py` imports both from there. The console reuses `ratel.history.matches`,
+`ratel.bus.MENTION_RE` and `ratel.clan.session.ACTIVITY_STATES` rather than copying them.
+
+Validation: `uv lock --check`, Ruff, the full suite (Pilot tests at 80x24 and 140x40, live
+arrival from a second Bus within 1.5 s, a stale-generation event ignored) and
+`scripts/verify-wheel.py`, which now composes the console against the installed wheel's demo
+home. Only temporary homes are used.

@@ -31,8 +31,8 @@ from .clan.config import catalog as clan_catalog
 from .clan.proposal import validate_clan_attachment
 from .clan.session import ClanError, activity
 from .clan.state import revision as state_revision
-from .paths import channel_path, confined
-from .schema import validate_name
+from .paths import channel_path, confined, list_channels
+from .schema import safe_repo, validate_name
 from .ulid import is_ulid
 from .unfurl import unfurl
 
@@ -48,13 +48,6 @@ def board_page() -> bytes:
 
 
 CHANNEL_RE = re.compile(r"^[A-Za-z0-9_.-]+$")
-# `repo` lands in the sidebar from the agent-writable clan.toml. A conservative
-# owner/name slug only; anything else is dropped, never escaped-and-shown.
-REPO_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*/[A-Za-z0-9][A-Za-z0-9._-]*$")
-
-
-def _safe_repo(value: object) -> str | None:
-    return value if isinstance(value, str) and REPO_RE.fullmatch(value) else None
 
 
 # Vendored assets, served at /static/. The requested name is only ever used as a
@@ -207,26 +200,6 @@ def _clan_signature(home: Path, ch: str) -> str:
         except OSError:
             parts.append(f"{d.name}:-")
     return hashlib.sha1("|".join(parts).encode()).hexdigest()
-
-
-def list_channels(home: Path) -> list[str]:
-    try:
-        root = confined(home, "channels")
-    except ValueError:
-        return []
-    if not root.is_dir():
-        return []
-    channels = []
-    for p in root.iterdir():
-        try:
-            validate_name(p.name)
-            if (channel_path(home, p.name, "channel.sqlite3").is_file()
-                    or channel_path(home, p.name, "bus.jsonl").is_file()):
-                channels.append(p.name)
-        except ValueError:
-            continue
-    return sorted(channels)
-
 
 
 class BoardHandler(BaseHTTPRequestHandler):
@@ -445,7 +418,7 @@ class BoardHandler(BaseHTTPRequestHandler):
             state = read_state(ClanPaths(self.home, ch))
             if not isinstance(state, dict):
                 state = {}
-            repo, issue = _safe_repo(cfg.repo), cfg.issue
+            repo, issue = safe_repo(cfg.repo), cfg.issue
             checkout = state.get("checkout") or cfg.checkout
             created = state.get("created")
         return {"name": ch, "agents": bus.presence(), "count": summary["count"],
