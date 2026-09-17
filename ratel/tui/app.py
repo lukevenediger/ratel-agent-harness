@@ -409,7 +409,8 @@ class RatelTui(App):
         if index is None:
             return
         att = atts[index]
-        title = render.attachment(att, self.colour_for).plain.split("\n", 1)[0]
+        full = render.attachment(att, self.colour_for)
+        title = full.plain.split("\n", 1)[0]
         if render.previewable(att):
             try:
                 text, truncated = self.reader.file_text(self.channel, att.get("ref"), att.get("name"), att.get("mime"))
@@ -424,7 +425,7 @@ class RatelTui(App):
             else:
                 self.push_screen(PreviewScreen(title, markdown=text, note=note))
         else:
-            self.push_screen(PreviewScreen(title, plain=render.attachment(att, self.colour_for),
+            self.push_screen(PreviewScreen(title, plain=full,
                                            note="not previewable: metadata only, bytes never read"))
 
     def action_filter(self) -> None:

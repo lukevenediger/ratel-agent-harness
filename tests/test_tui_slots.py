@@ -45,7 +45,7 @@ def test_malformed_file_starts_a_fresh_map(tmp_path):
     (tmp_path / "tui.toml").write_text('[slots."../x"]\na = 1\n[slots.ch]\n"bad name!" = 1\nok = 3\n')
     m = SlotMap(tmp_path, persist=True)
     assert m.slot("ch", "ok") == 3 and m.colour("ch", "fresh") == PALETTE[3]
-    assert "../x" not in m.channels()
+    assert "../x" not in m.table
 
 
 def test_dump_and_load_round_trip_quotes_keys():

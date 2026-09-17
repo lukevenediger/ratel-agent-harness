@@ -58,18 +58,15 @@ def load(text: str) -> dict[str, dict[str, int]]:
 
 
 class SlotMap:
-    def __init__(self, home: Path | str | None, persist: bool = True):
-        self.home = Path(home).expanduser() if home is not None else None
-        self.persist = persist and self.home is not None
+    def __init__(self, home: Path | str, persist: bool = True):
+        self.home = Path(home).expanduser()
+        self.persist = persist
         self.table: dict[str, dict[str, int]] = {}
         if self.persist:
             try:
                 self.table = load(confined(self.home, FILE).read_text())
             except (OSError, ValueError):
                 self.table = {}
-
-    def channels(self) -> list[str]:
-        return sorted(self.table)
 
     def slot(self, channel: str, agent: str) -> int:
         """The 1-based first-seen ordinal of `agent` on `channel`, assigning one on first use."""
