@@ -24,6 +24,12 @@ def test_scrub_removes_c0_c1_and_del_but_keeps_newline_and_tab():
     assert render.scrub("a\x00b\x1b[31mc\x7fd\x85e\n\tf") == "abcde\n\tf"
 
 
+def test_scrub_removes_cr_and_unicode_bidi_controls():
+    # CR is C0 too; bidi overrides and isolates reorder a line visually and can
+    # spoof a VERDICT or a @mention in an audit console.
+    assert render.scrub("a\rb\u202ac\u202bd\u202ce\u202df\u202eg\u2066h\u2067i\u2068j\u2069k\n") == "abcdefghijk\n"
+
+
 def test_body_never_parses_rich_markup():
     text = render.body("[bold red]x[/] [link=http://e]y[/link]", colour)
     assert text.plain == "[bold red]x[/] [link=http://e]y[/link]"

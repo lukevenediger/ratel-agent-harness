@@ -386,6 +386,53 @@ def test_a_previews_a_markdown_attachment(demo_home):
     run_app(app_for(demo_home), script, WIDE)
 
 
+ESCAPES = "\x1b]52;c;Y3VybA==\x1b\\ \x1b[2J \x1b[6n \x1b]0;title\x07"
+
+
+def test_preview_scrubs_escapes_for_plain_and_markdown(demo_home):
+    bus = Bus(demo_home, "harbor-demo")
+    for name in ("evil.txt", "evil.md"):
+        src = demo_home.parent / name
+        src.write_text(f"safe start {ESCAPES} safe end\n")
+        bus.post("attacker", f"see {name}", attachments=[bus.attach_file(src)])
+
+    async def script(pilot):
+        app = pilot.app
+        await pilot.pause()
+        for keys, is_markdown in ((("G", "k", "a"), False), (("G", "a"), True)):
+            await pilot.press(*keys)
+            await pilot.pause()
+            await pilot.press("enter")
+            await pilot.pause()
+            assert isinstance(app.screen, PreviewScreen)
+            assert (app.screen.markdown is not None) is is_markdown
+            text = screen_text(app)
+            assert "\x1b" not in text and "\x07" not in text, keys
+            assert "safe start" in text and "safe end" in text
+            await pilot.press("escape")
+            await pilot.pause()
+            assert not isinstance(app.screen, PreviewScreen)
+    run_app(app_for(demo_home), script, WIDE)
+
+
+def test_preview_error_shows_fixed_text_never_the_exception(demo_home):
+    async def script(pilot):
+        app = pilot.app
+        await pilot.pause()
+
+        def boom(*args, **kwargs):
+            raise OSError("/secret/absolute/path.md")
+        app.reader.file_text = boom
+        await pilot.press("G", "k", "a")
+        await pilot.pause()
+        await pilot.press("enter")
+        await pilot.pause()
+        assert isinstance(app.screen, PreviewScreen)
+        text = screen_text(app)
+        assert "preview unavailable" in text and "/secret" not in text and "path.md" not in text
+    run_app(app_for(demo_home), script, WIDE)
+
+
 def test_a_shows_only_metadata_for_images_and_pdfs(demo_home):
     bus = Bus(demo_home, "harbor-demo")
     (bus.files_dir / "shot.png").write_bytes(b"PNGSECRETBYTES")

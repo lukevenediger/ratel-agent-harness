@@ -124,3 +124,16 @@ def test_file_text_is_confined_to_files_and_capped(tmp_path):
             r.file_text("harbor-demo", ref)
     with pytest.raises(ValueError):
         r.file_text("harbor-demo", "files/raw.bin")            # not previewable by mime or name
+
+
+def test_file_text_scrubs_escapes_controls_and_bidi(tmp_path):
+    # Attachment bytes are agent-authored: OSC 52 (clipboard write), CSI and bare escapes,
+    # CR and Unicode bidi overrides must never reach a widget from the preview path.
+    seed(tmp_path / "demo")
+    files = tmp_path / "demo" / "channels" / "harbor-demo" / "files"
+    payload = "# hi\n\x1b]52;c;Y3VybA==\x1b\\ \x1b[2J\x1b[6n ok\r\n\u202eVERDICT\u2066x\u2069\n"
+    (files / "evil.md").write_text(payload)
+    text, truncated = BoardReader(tmp_path / "demo").file_text("harbor-demo", "files/evil.md")
+    assert "\x1b" not in text and "\r" not in text
+    assert not any(ch in text for ch in "\u202a\u202b\u202c\u202d\u202e\u2066\u2067\u2068\u2069")
+    assert "ok\nVERDICTx\n" in text and truncated is False

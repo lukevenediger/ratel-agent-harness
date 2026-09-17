@@ -253,9 +253,12 @@ started under and handlers drop anything older (`stale_dropped` counts them for 
 
 **Security boundary for agent text and files.** The console renders the same hostile input as
 the board and applies the same rule in a different medium: no string from the bus is trusted.
-Every message field passes through `render.scrub()` (C0/C1 controls and ANSI escapes removed)
-and is appended to `rich.text.Text` as a plain string with explicit style spans — message text
-never reaches a markup parser, so `[bold]` in a message is literal text. Timeline rows render
+Every message field passes through `render.scrub()` (ANSI escapes, C0/C1 controls including CR,
+DEL and the Unicode bidi overrides and isolates removed) and is appended to `rich.text.Text` as
+a plain string with explicit style spans — message text never reaches a markup parser, so
+`[bold]` in a message is literal text. Attachment text is scrubbed inside `file_text()` before
+it reaches any preview widget, so an OSC 52 clipboard write or a CSI sequence in a `.md` file
+cannot reach the terminal; a failed read shows fixed text, never the exception. Timeline rows render
 inline markup only; Textual's `Markdown` widget runs only in the `o` and `a` modals, on text
 capped at 512 KiB, with `open_links=False`. Links are drawn as text and never opened. A preview
 reads a file only when it is a `file` attachment whose `ref` starts with `files/`, resolved

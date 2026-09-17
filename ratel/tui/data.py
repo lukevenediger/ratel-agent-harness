@@ -112,4 +112,5 @@ class BoardReader:
             raise ValueError("attachment is not a regular file")
         with path.open("rb") as f:
             data = f.read(FILE_TEXT_CAP + 1)
-        return data[:FILE_TEXT_CAP].decode("utf-8", "replace"), len(data) > FILE_TEXT_CAP
+        # Attachment bytes are agent-authored: scrub here so every preview sink gets clean text.
+        return scrub(data[:FILE_TEXT_CAP].decode("utf-8", "replace")), len(data) > FILE_TEXT_CAP

@@ -418,8 +418,9 @@ strike, `@name` in that agent's colour, fences cut at 6 lines with `… +N lines
 Markdown appears only in the `o` and `a` modals, capped at 512 KiB, with links inert. A preview
 opens only a `file` attachment under `files/` whose mime is `text/markdown` or `text/plain` or
 whose name ends in `.md`, `.txt` or `.log`; `text/plain` shows verbatim, the rest as Markdown.
-Any other file shows name · mime · pages · ref and its bytes are never read. Links render as
-text; nothing is opened.
+Any other file shows name · mime · pages · ref and its bytes are never read. Message and
+attachment text are scrubbed of ANSI escapes, control characters and Unicode bidi controls
+before they reach the screen. Links render as text; nothing is opened.
 
 **Colour slots.** Agents are coloured from the board's eight-slot palette in first-seen order
 per channel, persisted to `$RATEL_HOME/tui.toml` so a later agent never re-colours an earlier

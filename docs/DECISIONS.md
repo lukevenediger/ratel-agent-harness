@@ -780,8 +780,11 @@ existing pattern for async code — rather than a new pytest plugin.
 `rich.text.Text` built from scrubbed strings with explicit spans; no message text ever reaches
 a markup parser. Block Markdown (Textual's `Markdown` widget) renders only in the message and
 preview modals, capped at 512 KiB with `open_links=False`. Previews open only text/markdown and
-text/plain attachments under the channel's `files/` through `ratel.paths.confined`; images and
-PDFs show name, mime, pages and ref, and their bytes are never read. Links are text; nothing is
+text/plain attachments under the channel's `files/` through `ratel.paths.confined`, and their
+text is scrubbed in `file_text()` itself — the security review of Round 2 showed an OSC 52
+clipboard write in an attachment reaching the terminal because only message text was scrubbed;
+`scrub()` now also drops CR and the Unicode bidi controls. Images and PDFs show name, mime,
+pages and ref, and their bytes are never read. Links are text; nothing is
 opened from the console.
 
 **Two helpers moved so `ratel.tui` never imports `ratel.board`.** `list_channels` now lives in

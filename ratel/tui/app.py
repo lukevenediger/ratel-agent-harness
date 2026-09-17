@@ -415,8 +415,10 @@ class RatelTui(App):
         if render.previewable(att):
             try:
                 text, truncated = self.reader.file_text(self.channel, att.get("ref"), att.get("name"), att.get("mime"))
-            except (OSError, ValueError) as e:
-                self.push_screen(PreviewScreen(title, plain=Text(str(e)), note="preview unavailable"))
+            except (OSError, ValueError):
+                # Fixed text, never exception text: an OSError carries a filesystem path.
+                self.push_screen(PreviewScreen(title, plain=Text("this attachment could not be read", render.MUTED),
+                                               note="preview unavailable"))
                 return
             note = "truncated at 512 KiB" if truncated else ""
             if render.scrub(att.get("mime")).lower() == "text/plain":

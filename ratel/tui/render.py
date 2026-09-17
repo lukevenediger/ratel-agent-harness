@@ -26,7 +26,8 @@ PREVIEW_MIMES = ("text/markdown", "text/plain")
 PREVIEW_SUFFIXES = (".md", ".txt", ".log")
 
 _ANSI = re.compile(r"\x1b(?:\[[0-?]*[ -/]*[@-~]|[@-Z\\-_])")  # CSI sequences and 2-byte escapes
-_CONTROLS = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f\x80-\x9f]")
+# C0 (except \n and \t), DEL, C1, and the Unicode bidi overrides/isolates that reorder a line.
+_CONTROLS = re.compile(r"[\x00-\x08\x0b-\x1f\x7f\x80-\x9f\u202a-\u202e\u2066-\u2069]")
 _INLINE = re.compile(
     r"`([^`\n]+)`"                       # 1 code
     r"|\*\*(.+?)\*\*"                    # 2 bold
@@ -38,7 +39,8 @@ _FENCE = re.compile(r"^```[^\n]*\n(.*?)(?:\n```[ \t]*$|\Z)", re.M | re.S)
 
 
 def scrub(text) -> str:
-    """Drop ANSI escape sequences, C0/C1 controls and DEL; keep newline and tab."""
+    """Drop ANSI escape sequences, C0/C1 controls (CR included), DEL and Unicode
+    bidi controls; keep newline and tab."""
     return _CONTROLS.sub("", _ANSI.sub("", text if isinstance(text, str) else ""))
 
 
