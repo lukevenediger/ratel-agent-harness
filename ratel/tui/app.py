@@ -1,4 +1,4 @@
-"""RatelTui: the Textual app. It consumes the pure layer (ChannelModel,
+"""RatelTui: the Textual app. It drives the pure layer (ChannelModel,
 BoardReader, render, SlotMap, poll loop bodies) and owns two generation
 counters: `generation` for the open channel and `thread_generation` for the
 open thread. Every poll event carries the generation it was started under;

@@ -28,7 +28,9 @@ def test_ratel_tui_console_script_is_declared():
 
 
 def test_tui_package_never_names_a_cursor_moving_bus_method():
-    forbidden = re.compile(r"\b(consume|wait_for_new|set_cursor|touch_cursor)\b")
+    # A plain substring match, not a word match: the guarantee must hold for
+    # `grep consume ratel/tui`, so even "consumes" in a docstring is out.
+    forbidden = re.compile(r"consume|wait_for_new|set_cursor|touch_cursor")
     for path in TUI.rglob("*.py"):
         assert not forbidden.search(path.read_text()), path
 
