@@ -34,6 +34,14 @@ class StorageChanged(PollEvent):
     payload: Storage
 
 
+class ThreadLoaded(Message):
+    """A thread fetched by the thread worker; `thread_generation` guards against a
+    later selection overtaking an earlier fetch."""
+    def __init__(self, generation: int, thread_generation: int, thread: dict | None) -> None:
+        super().__init__()
+        self.generation, self.thread_generation, self.thread = generation, thread_generation, thread
+
+
 _WRAP = {Batch: MessagesArrived, PinsUpdate: PinsChanged, PresenceUpdate: PresenceChanged, Storage: StorageChanged}
 
 

@@ -245,3 +245,40 @@ def reaped_subprocesses_impl():
 @pytest.fixture
 def reaped_subprocesses():
     yield from reaped_subprocesses_impl()
+
+
+# -- ratel-tui (Textual) ----------------------------------------------------
+
+def run_app(app, script, size=(80, 24)):
+    """Drive a Textual app headlessly: `script(pilot)` is a coroutine run inside
+    `App.run_test`, from a plain sync test via asyncio.run (the repo's pattern
+    for async code, see test_mcp_server.py — no pytest plugin)."""
+    import asyncio
+
+    async def go():
+        async with app.run_test(size=size) as pilot:
+            return await script(pilot)
+    return asyncio.run(go())
+
+
+def screen_text(app) -> str:
+    """The screen as plain text (what a screenshot would show, minus colour)."""
+    import io
+
+    from rich.console import Console
+
+    width, height = app.size
+    console = Console(width=width, height=height, file=io.StringIO(), force_terminal=True,
+                      color_system="truecolor", record=True, legacy_windows=False, safe_box=False)
+    console.print(app.screen._compositor.render_update(full=True, screen_stack=app._background_screens))
+    return console.export_text()
+
+
+@pytest.fixture
+def demo_home(tmp_path, monkeypatch):
+    """A seeded `harbor-demo` home (ratel.demo.seed) that is also RATEL_HOME for the test."""
+    from ratel.demo import seed
+
+    home = Path(seed(tmp_path / "demo")["home"])
+    monkeypatch.setenv("RATEL_HOME", str(home))
+    return home

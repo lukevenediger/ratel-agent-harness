@@ -1,0 +1,53 @@
+/* ratel-tui: dark tokens from docs/design/DESIGN.md */
+Screen {
+    background: #12161D;
+    color: #E9EDF3;
+    layers: base overlay;
+}
+
+#sidebar {
+    width: 24;
+    background: #0A0E14;
+    border-right: solid #262D38;
+    padding: 0 1;
+}
+#sidebar .channel { padding: 0; }
+#sidebar .channel.-selected { background: #1A202A; }
+#sidebar .channel.-current { color: #4CC2FF; }
+#sidebar:focus { border-right: solid #4CC2FF; }
+
+#main { width: 1fr; }
+#topbar { height: 1; padding: 0 1; background: #171C24; }
+#pins { height: auto; max-height: 1; padding: 0 1; background: #171C24; color: #A8B3C4; }
+#pins.-expanded { max-height: 12; overflow-y: auto; }
+#timeline { height: 1fr; padding: 0 1; }
+#status { height: 1; padding: 0 1; background: #171C24; color: #A8B3C4; }
+
+#thread { width: 40; border-left: solid #262D38; padding: 0 1; }
+#thread.-open { border-left: solid #5B6D85; }
+#thread:focus { border-left: solid #4CC2FF; }
+
+.row { height: auto; margin-bottom: 1; }
+.row.day, .row.new { margin-bottom: 0; }
+.row.new { color: #4CC2FF; }
+.row.-selected { background: #1A202A; }
+.row.-flash { border-left: thick #4CC2FF; }
+
+/* narrow (< 110 cols): no sidebar, no thread panel; `s` overlays the sidebar */
+Screen.-narrow #sidebar { display: none; }
+Screen.-narrow #thread { display: none; }
+Screen.-narrow #sidebar.-overlay { display: block; layer: overlay; dock: left; height: 100%; }
+
+#thread-title { height: 1; padding: 0 1; background: #171C24; }
+#thread-screen-panel { height: 1fr; padding: 0 1; }
+
+ModalScreen { align: center middle; background: rgba(0, 0, 0, 0.55); }
+ModalScreen > * { background: #171C24; border: solid #5B6D85; width: 90%; }
+ModalScreen > .modal-title { height: auto; padding: 0 1; border-bottom: none; }
+ModalScreen > .modal-body { height: 1fr; max-height: 80%; padding: 0 1; border-top: none; border-bottom: none; }
+ModalScreen > .modal-note { height: auto; padding: 0 1; border-top: none; }
+ModalScreen > OptionList { max-height: 60%; }
+FilterScreen > Input, FilterScreen > Checkbox { border-top: none; border-bottom: none; }
+FilterScreen > Checkbox { border-bottom: solid #5B6D85; }
+Markdown { background: #171C24; }
+.code-full { background: #0D1118; padding: 0 1; }
