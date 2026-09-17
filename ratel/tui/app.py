@@ -99,9 +99,10 @@ class RatelTui(App):
 
     def _apply_width(self, width: int) -> None:
         self.narrow = width < WIDE_COLS
-        self.screen.set_class(self.narrow, "-narrow")
+        base = self.screen_stack[0]   # the main screen, not whichever modal is on top
+        base.set_class(self.narrow, "-narrow")
         if not self.narrow:
-            self.query_one("#sidebar").remove_class("-overlay")
+            base.query_one("#sidebar").remove_class("-overlay")
 
     # -- helpers ------------------------------------------------------------
 

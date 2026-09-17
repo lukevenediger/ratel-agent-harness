@@ -1,6 +1,7 @@
 """RatelTui driven headlessly through Pilot: layout, keys, live arrival, filter,
 stale generations, modals. Every run uses a temporary seeded home."""
 from conftest import run_app, screen_text
+from textual.widgets import Checkbox
 
 from ratel.bus import Bus
 from ratel.history import matches
@@ -10,6 +11,7 @@ from ratel.tui.screens.filter import FilterScreen
 from ratel.tui.screens.help import HelpScreen
 from ratel.tui.screens.message import MessageScreen
 from ratel.tui.screens.preview import PreviewScreen
+from ratel.tui.widgets.sidebar import Sidebar
 from ratel.tui.widgets.thread import ThreadScreen
 
 WIDE = (140, 40)
@@ -176,6 +178,34 @@ def test_n_p_and_digits_switch_channels_and_bump_the_generation(demo_home):
     run_app(app_for(demo_home), script, WIDE)
 
 
+def test_sidebar_cursor_survives_the_presence_refresh_and_follows_a_real_switch(demo_home):
+    for ch in ("aaa", "bbb", "ccc"):
+        Bus(demo_home, ch).post("a", "x")
+
+    async def script(pilot):
+        app = pilot.app
+        await pilot.pause()
+        sidebar = app.query_one("#sidebar", Sidebar)
+        names = [c["name"] for c in app.channels]
+        assert names[sidebar.index] == "harbor-demo"
+        sidebar.focus()
+        await pilot.press("k")
+        moved = sidebar.index
+        assert names[moved] == "aaa"
+        # what the presence worker posts every 10 s must not move the reader's cursor
+        app.post_message(events.PresenceChanged(poll.PresenceUpdate(
+            app.generation, app.reader.presence("harbor-demo"), app.reader.channels())))
+        await pilot.pause()
+        assert sidebar.index == moved and app.channel == "harbor-demo"
+        await pilot.press("enter")
+        await pilot.pause()
+        assert app.channel == "aaa" and names[sidebar.index] == "aaa"
+        await pilot.press("n")   # a real switch moves the highlight to the open channel
+        await pilot.pause()
+        assert app.channel == "harbor-demo" and names[sidebar.index] == "harbor-demo"
+    run_app(app_for(demo_home), script, WIDE)
+
+
 # -- live -------------------------------------------------------------------
 
 def test_a_message_from_another_process_arrives_with_a_new_divider_and_N_clears_it(demo_home):
@@ -304,6 +334,29 @@ def test_m_cycles_the_mention_filter_and_O_toggles_operator_only(demo_home):
         assert "operator" in screen_text(app)
         await pilot.press("O")
         assert len(rows(app)) == 6
+    run_app(app_for(demo_home), script, WIDE)
+
+
+def test_filter_modal_enter_applies_from_the_operator_checkbox_and_the_mention_input(demo_home):
+    msgs = demo_messages(demo_home)
+
+    async def script(pilot):
+        app = pilot.app
+        await pilot.pause()
+        await pilot.press("slash")
+        app.screen.query_one("#operator", Checkbox).focus()
+        await pilot.press("space", "enter")
+        await pilot.pause()
+        assert not isinstance(app.screen, FilterScreen)
+        assert app.model.operator is True
+        assert len(rows(app)) == sum(1 for m in msgs if matches(m, operator=True))
+        await pilot.press("slash")
+        app.screen.query_one("#mention").focus()
+        await pilot.press(*"developer", "enter")
+        await pilot.pause()
+        assert not isinstance(app.screen, FilterScreen)
+        assert app.model.mention == "developer" and app.model.operator is True
+        assert len(rows(app)) == sum(1 for m in msgs if matches(m, mention="developer", operator=True))
     run_app(app_for(demo_home), script, WIDE)
 
 
@@ -459,6 +512,29 @@ def test_a_shows_only_metadata_for_images_and_pdfs(demo_home):
         await pilot.pause()
         text = screen_text(app)
         assert "paper.pdf" in text and "application/pdf" in text and "3 pages" in text
+    run_app(app_for(demo_home), script, WIDE)
+
+
+def test_resize_while_a_modal_is_open_still_lays_out_the_main_screen(demo_home):
+    async def script(pilot):
+        app = pilot.app
+        await pilot.pause()
+        assert app.query_one("#sidebar").display
+        await pilot.press("question_mark")
+        assert isinstance(app.screen, HelpScreen)
+        await pilot.resize_terminal(*NARROW)
+        await pilot.pause()
+        await pilot.press("escape")
+        await pilot.pause()
+        assert app.narrow and app.screen.has_class("-narrow")
+        assert not app.query_one("#sidebar").display and not app.query_one("#thread").display
+        await pilot.press("question_mark")
+        await pilot.resize_terminal(*WIDE)
+        await pilot.pause()
+        await pilot.press("escape")
+        await pilot.pause()
+        assert not app.narrow and not app.screen.has_class("-narrow")
+        assert app.query_one("#sidebar").display and app.query_one("#thread").display
     run_app(app_for(demo_home), script, WIDE)
 
 

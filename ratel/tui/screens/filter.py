@@ -12,7 +12,11 @@ QUERY_MAX = 200
 
 
 class FilterScreen(ModalScreen[dict | None]):
-    BINDINGS = [Binding("escape", "cancel", "close", show=False)]
+    BINDINGS = [
+        # priority: the Checkbox binds enter to toggle and would otherwise swallow it
+        Binding("enter", "apply", "apply", show=False, priority=True),
+        Binding("escape", "cancel", "close", show=False),
+    ]
 
     def __init__(self, query: str = "", mention: str = "", operator: bool = False) -> None:
         super().__init__()
@@ -26,10 +30,6 @@ class FilterScreen(ModalScreen[dict | None]):
 
     def on_mount(self) -> None:
         self.query_one("#query", Input).focus()
-
-    def on_input_submitted(self, event: Input.Submitted) -> None:
-        event.stop()
-        self.action_apply()
 
     def action_apply(self) -> None:
         self.dismiss({"query": self.query_one("#query", Input).value[:QUERY_MAX],

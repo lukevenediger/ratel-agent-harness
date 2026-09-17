@@ -53,6 +53,8 @@ class Sidebar(VerticalScroll):
         self.agents: list[dict] = []
         self.index = 0
         self._rows: list[ChannelRow] = []
+        self._current: str | None = None    # the open channel at the last set_channels
+        self._selected: str | None = None   # the highlighted channel, by name
         self._colour_for = lambda name: ""
 
     def compose(self) -> ComposeResult:
@@ -64,7 +66,12 @@ class Sidebar(VerticalScroll):
         self.query(ChannelRow).remove()
         self.mount(*self._rows, before="#agents")
         names = [r["name"] for r in channels]
-        self.select(names.index(current) if current in names else 0)
+        # A refresh keeps the reader's highlight; a real switch (or the first
+        # population) moves it to the open channel.
+        keep = self._selected if current == self._current else None
+        self._current = current
+        target = keep if keep in names else current
+        self.select(names.index(target) if target in names else 0)
 
     def set_agents(self, presence: list[dict], colour_for) -> None:
         self._colour_for = colour_for
@@ -88,6 +95,7 @@ class Sidebar(VerticalScroll):
         for i, r in enumerate(rows):
             r.set_class(i == index, "-selected")
         self.index = index
+        self._selected = rows[index].name
 
     def action_cursor(self, delta: int) -> None:
         self.select(self.index + delta)
