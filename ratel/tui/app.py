@@ -119,12 +119,9 @@ class RatelTui(App):
         return Row("msg", message_text(msg, self.colour_for, self.model.reply_count(msg["id"]),
                                        self.slots.wrapped(self.channel or "", sender)), msg)
 
-    def _timeline_index(self) -> int:
-        return self.model.cursor
-
     def _render_timeline(self, flash: set[str] = frozenset()) -> None:
         rows = [self._row(r.msg) if r.kind == "msg" else divider(r) for r in self.model.rows()]
-        self.query_one(Timeline).set_rows(rows, self._timeline_index(), flash)
+        self.query_one(Timeline).set_rows(rows, self.model.cursor, flash)
         self._render_status()
 
     def _sync_cursor(self) -> None:
@@ -132,7 +129,7 @@ class RatelTui(App):
         if self.model.new_id is None and self.query("#timeline .new"):
             self._render_timeline()
         else:
-            self.query_one(Timeline).select(self._timeline_index())
+            self.query_one(Timeline).select(self.model.cursor)
             self._render_status()
 
     def _render_pins(self) -> None:

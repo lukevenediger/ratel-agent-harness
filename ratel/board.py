@@ -48,8 +48,6 @@ def board_page() -> bytes:
 
 
 CHANNEL_RE = re.compile(r"^[A-Za-z0-9_.-]+$")
-# `repo` lands in the sidebar from the agent-writable clan.toml. A conservative
-# owner/name slug only; anything else is dropped, never escaped-and-shown.
 
 
 # Vendored assets, served at /static/. The requested name is only ever used as a

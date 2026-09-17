@@ -14,9 +14,9 @@ from ..model import Row as ModelRow
 FLASH_S = 1.2
 
 
-def message_text(msg: dict, colour_for, replies: int = 0, wrapped: bool = False, tz=None) -> Text:
+def message_text(msg: dict, colour_for, replies: int = 0, wrapped: bool = False) -> Text:
     """Header, body and one line per attachment for a timeline or thread row."""
-    head = render.header(msg, colour_for, replies, tz)
+    head = render.header(msg, colour_for, replies)
     if wrapped:
         head = Text("┆") + head[1:]
     if isinstance(msg.get("parent"), str):

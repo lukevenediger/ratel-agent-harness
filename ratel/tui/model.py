@@ -140,14 +140,6 @@ class ChannelModel:
     def reply_count(self, msg_id: str) -> int:
         return sum(1 for m in self.messages if m.get("parent") == msg_id)
 
-    def agents(self) -> list[str]:
-        seen: list[str] = []
-        for m in self.messages:
-            sender = m.get("from")
-            if isinstance(sender, str) and sender not in seen:
-                seen.append(sender)
-        return seen
-
     def newest_pin(self) -> dict | None:
         return self.pins[-1] if self.pins else None
 
@@ -195,9 +187,6 @@ class ChannelModel:
                 self._land()
                 return True
         return False
-
-    def clear_new(self) -> None:
-        self.new_id = None
 
     def jump_new(self) -> bool:
         return self.new_id is not None and self.select_id(self.new_id)

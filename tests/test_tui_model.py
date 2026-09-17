@@ -126,7 +126,7 @@ def test_client_side_filter_uses_history_matches_and_hides_non_matching_live_row
     assert m.filter_label() == "" and len(m.visible()) == 4
 
 
-def test_pins_tasks_progress_and_agents_seen():
+def test_pins_tasks_progress_and_newest_pin():
     m = model()
     plan = msg(sender="orch", text="plan", attachments=[{"type": "tasks", "ref": "plans/p.md", "items": [
         {"text": "a", "done": True}, {"text": "b", "done": False}, {"text": "c"}]}])
@@ -134,5 +134,4 @@ def test_pins_tasks_progress_and_agents_seen():
     assert m.tasks_progress() is None
     m.set_pins([msg(sender="orch", text="old pin"), plan])
     assert m.tasks_progress() == (1, 3)
-    assert m.agents() == ["orch", "dev", "rev"]
     assert m.newest_pin()["id"] == plan["id"]
